@@ -98,7 +98,7 @@ Headless 層は更に二つに分解される。**唯一の不変条件は「She
 | B2 | サーバ | 観測専用の薄い Shell（リモートセッション購読のみ） | **`feature-flags`** |
 | C | サーバ | ブラウザ固定のデータプレーンを実行する Shell | `s3-uploader`, `passkey-auth`, `stripe-checkout` |
 
-ケース C は HAWC からの逸脱ではなく **第一級のケース**。ブラウザでしか実行できないデータプレーン（直接アップロード、WebRTC、WebUSB、`File System Access API`、ユーザジェスチャ依存の処理、PCI スコープを避けるための Stripe Elements など）が存在するときに発生する。Shell が太くなっても、**意思決定が Core にある限り** CSBC 違反ではない。
+ケース C は CSBC からの逸脱ではなく **第一級のケース**。ブラウザでしか実行できないデータプレーン（直接アップロード、WebRTC、WebUSB、`File System Access API`、ユーザジェスチャ依存の処理、PCI スコープを避けるための Stripe Elements など）が存在するときに発生する。Shell が太くなっても、**意思決定が Core にある限り** CSBC 違反ではない。
 
 > 不変条件:
 > **Core はすべての決定を持つ。Shell は委譲できない実行だけを持つ。**

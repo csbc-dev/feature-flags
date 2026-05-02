@@ -129,7 +129,7 @@ export class FlagsmithProvider implements FlagProvider {
     if (options.realtime && !_realtimeWarningLogged) {
       _realtimeWarningLogged = true;
       console.warn(
-        "[@wc-bindable/flags] FlagsmithProvider: `realtime` is accepted but not yet implemented — falling back to polling. Lower `pollingIntervalMs` for faster change detection. (This warning is logged once per process.)",
+        "[@csbc-dev/feature-flags] FlagsmithProvider: `realtime` is accepted but not yet implemented — falling back to polling. Lower `pollingIntervalMs` for faster change detection. (This warning is logged once per process.)",
       );
     }
   }

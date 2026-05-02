@@ -109,7 +109,7 @@ export interface FlagProvider {
 /**
  * Minimal shape of the `UserContext` produced by
  * `@wc-bindable/auth0`'s `verifyAuth0Token()`. Typed structurally
- * here so `@wc-bindable/flags` does not depend on auth0-gate at
+ * here so `@csbc-dev/feature-flags` does not depend on auth0-gate at
  * the package level — server integrations can pass the real UserContext
  * and it will structurally satisfy this.
  */

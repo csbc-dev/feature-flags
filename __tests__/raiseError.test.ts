@@ -3,7 +3,7 @@ import { raiseError } from "../src/raiseError";
 
 describe("raiseError", () => {
   it("throws an Error prefixed with the package name", () => {
-    expect(() => raiseError("boom")).toThrow("[@wc-bindable/flags] boom");
+    expect(() => raiseError("boom")).toThrow("[@csbc-dev/feature-flags] boom");
   });
 
   it("the thrown value is an Error instance", () => {

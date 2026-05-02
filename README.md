@@ -1,6 +1,6 @@
-# @wc-bindable/flags
+# @csbc-dev/feature-flags
 
-`@wc-bindable/flags` is a headless feature-flag observation component for the wc-bindable ecosystem.
+`@csbc-dev/feature-flags` is a headless feature-flag observation component for the wc-bindable ecosystem.
 
 It is not a visual UI widget. It is a **pure observation node** that connects server-side flag evaluation to reactive browser-side state:
 
@@ -9,7 +9,7 @@ It is not a visual UI widget. It is a **pure observation node** that connects se
 
 Feature-flag state can be expressed declaratively in HTML, without writing SDK integration, identify calls, or streaming glue code in your UI layer.
 
-`@wc-bindable/flags` follows the [HAWC](https://github.com/wc-bindable-protocol/wc-bindable-protocol/blob/main/packages/hawc/README.md) architecture as the **Case B2** shape: Core on the server, thin Shell in the browser, with the Shell acting as a pure observation adapter rather than a command surface:
+`@csbc-dev/feature-flags` follows the CSBC (Core/Shell Bindable Component) architecture as the **Case B2** shape: Core on the server, thin Shell in the browser, with the Shell acting as a pure observation adapter rather than a command surface:
 
 - **Server** (`FlagsCore`) handles SDK interaction, targeting-rule evaluation, identity management, and change propagation.
 - **Browser** (`<feature-flags>`) subscribes to the session proxy and re-dispatches the flag-shaped bindable surface onto itself.
@@ -22,7 +22,7 @@ Feature-flag services let you write targeting rules like *"enable this for users
 1. **Rule leakage.** Anyone can read `window.LaunchDarkly.__rules` in DevTools and see the full rollout strategy, including experiment names and cohorts that may be confidential.
 2. **Identity leakage.** Client-side SDKs need a per-user identity (email, plan, permissions) — that identity has to be serialized into the browser, widening the attack surface.
 
-`@wc-bindable/flags` is remote-only. Every flag evaluation runs on the server inside `FlagsCore`; the browser only observes results. A future `mode="local"` could be added for non-sensitive flags, but v1 does not ship it.
+`@csbc-dev/feature-flags` is remote-only. Every flag evaluation runs on the server inside `FlagsCore`; the browser only observes results. A future `mode="local"` could be added for non-sensitive flags, but v1 does not ship it.
 
 ## Three-layer composition
 
@@ -73,14 +73,14 @@ values.new_checkout_flow                 // ❌ — not part of the bindable sur
 
 Implications:
 
-- **Updates are whole-map.** Every change emits a new frozen map, not a delta. At ~100 flags * ~64 bytes per entry the payload is still under 10 KB per update — well within the budget for HAWC's WebSocket plane.
+- **Updates are whole-map.** Every change emits a new frozen map, not a delta. At ~100 flags * ~64 bytes per entry the payload is still under 10 KB per update — well within the budget for CSBC's WebSocket plane.
 - **No client schema required.** The server can add a flag and the next `flags-changed` event carries it. No migration.
 - **Reference-equality-based reactive frameworks see honest changes** (`Object.freeze({ ...next })`).
 
 ## Install
 
 ```bash
-npm install @wc-bindable/flags
+npm install @csbc-dev/feature-flags
 ```
 
 Pick whichever flag-service SDK matches your deployment (all optional peer deps):
@@ -93,15 +93,15 @@ npm install unleash-client                # Unleash
 npm install @launchdarkly/node-server-sdk # LaunchDarkly
 ```
 
-Any transport-layer dependency already comes from `@wc-bindable/auth0` (via `@wc-bindable/remote`); `@wc-bindable/flags` does not open its own socket.
+Any transport-layer dependency already comes from `@wc-bindable/auth0` (via `@wc-bindable/remote`); `@csbc-dev/feature-flags` does not open its own socket.
 
 ## Server setup (Flagsmith)
 
-> **Always import from `@wc-bindable/flags/server` on Node.** The root entry re-exports the `<feature-flags>` custom element, which extends `HTMLElement`; importing it in a Node-only runtime fails with `ReferenceError: HTMLElement is not defined`. The `/server` subpath exports only DOM-free artifacts (`FlagsCore`, providers, types) and loads cleanly under Node, Bun, Deno, and Cloudflare Workers.
+> **Always import from `@csbc-dev/feature-flags/server` on Node.** The root entry re-exports the `<feature-flags>` custom element, which extends `HTMLElement`; importing it in a Node-only runtime fails with `ReferenceError: HTMLElement is not defined`. The `/server` subpath exports only DOM-free artifacts (`FlagsCore`, providers, types) and loads cleanly under Node, Bun, Deno, and Cloudflare Workers.
 
 ```ts
 import { createAuthenticatedWSS } from "@wc-bindable/auth0/server";
-import { FlagsCore, FlagsmithProvider } from "@wc-bindable/flags/server";
+import { FlagsCore, FlagsmithProvider } from "@csbc-dev/feature-flags/server";
 
 const provider = new FlagsmithProvider({
   environmentKey: process.env.FLAGSMITH_ENV_KEY!,
@@ -127,8 +127,8 @@ Register the `FlagsCore` declaration on the client:
 
 ```ts
 import { registerCoreDeclaration, bootstrapAuth } from "@wc-bindable/auth0";
-import { FlagsCore } from "@wc-bindable/flags/server";
-import { bootstrapFlags } from "@wc-bindable/flags";
+import { FlagsCore } from "@csbc-dev/feature-flags/server";
+import { bootstrapFlags } from "@csbc-dev/feature-flags";
 
 registerCoreDeclaration("flags-core", FlagsCore.wcBindable);
 bootstrapAuth();
@@ -172,7 +172,7 @@ Same shape as Flagsmith — just swap the Provider. Unleash's own SDK centralize
 
 ```ts
 import { createAuthenticatedWSS } from "@wc-bindable/auth0/server";
-import { FlagsCore, UnleashProvider } from "@wc-bindable/flags/server";
+import { FlagsCore, UnleashProvider } from "@csbc-dev/feature-flags/server";
 
 const provider = new UnleashProvider({
   url: "https://unleash.example.com/api",
@@ -213,7 +213,7 @@ Same shape as Flagsmith / Unleash — swap the Provider. LaunchDarkly's Node SDK
 
 ```ts
 import { createAuthenticatedWSS } from "@wc-bindable/auth0/server";
-import { FlagsCore, LaunchDarklyProvider } from "@wc-bindable/flags/server";
+import { FlagsCore, LaunchDarklyProvider } from "@csbc-dev/feature-flags/server";
 
 const provider = new LaunchDarklyProvider({
   sdkKey: process.env.LD_SDK_KEY!,
@@ -316,7 +316,7 @@ new LaunchDarklyProvider({
 For in-process tests and demos, swap `FlagsmithProvider` for `InMemoryFlagProvider`:
 
 ```ts
-import { InMemoryFlagProvider, FlagsCore } from "@wc-bindable/flags/server";
+import { InMemoryFlagProvider, FlagsCore } from "@csbc-dev/feature-flags/server";
 
 const provider = new InMemoryFlagProvider({
   flags: [

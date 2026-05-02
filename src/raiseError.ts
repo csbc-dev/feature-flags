@@ -1,3 +1,3 @@
 export function raiseError(message: string): never {
-  throw new Error(`[@wc-bindable/flags] ${message}`);
+  throw new Error(`[@csbc-dev/feature-flags] ${message}`);
 }

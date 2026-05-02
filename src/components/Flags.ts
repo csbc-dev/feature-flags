@@ -131,7 +131,7 @@ export class Flags extends HTMLElement {
     const proxy = this._sessionEl?.proxy;
     if (!proxy) {
       throw new Error(
-        "[@wc-bindable/flags] <feature-flags>: identify() called before a session proxy is attached. Wait for the target session's ready=true.",
+        "[@csbc-dev/feature-flags] <feature-flags>: identify() called before a session proxy is attached. Wait for the target session's ready=true.",
       );
     }
     await proxy.invoke("identify", userId, attrs);
@@ -145,7 +145,7 @@ export class Flags extends HTMLElement {
     const proxy = this._sessionEl?.proxy;
     if (!proxy) {
       throw new Error(
-        "[@wc-bindable/flags] <feature-flags>: reload() called before a session proxy is attached. Wait for the target session's ready=true.",
+        "[@csbc-dev/feature-flags] <feature-flags>: reload() called before a session proxy is attached. Wait for the target session's ready=true.",
       );
     }
     await proxy.invoke("reload");
@@ -193,7 +193,7 @@ export class Flags extends HTMLElement {
     const session = this._resolveSession();
     if (!session) {
       this._setError(new Error(
-        `[@wc-bindable/flags] <feature-flags>: target "${this.target}" did not resolve to a session element exposing \`.proxy\`.`,
+        `[@csbc-dev/feature-flags] <feature-flags>: target "${this.target}" did not resolve to a session element exposing \`.proxy\`.`,
       ));
       // Rescue path: target may be late-bound (SSR hydration, async
       // mount, framework-ordered insertion). Observe the DOM and

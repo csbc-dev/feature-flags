@@ -1,5 +1,7 @@
 import type { FlagIdentity, FlagMap, FlagProvider, FlagUnsubscribe, FlagValue } from "../types.js";
 import { deepCloneAndFreeze } from "../freeze.js";
+import { raiseError } from "../raiseError.js";
+import { identityKey as _identityKey } from "./_identityKey.js";
 
 /**
  * Simple per-identity flag rule. The first matching entry wins; if no
@@ -39,10 +41,14 @@ export interface InMemoryFlagProviderOptions {
  */
 export class InMemoryFlagProvider implements FlagProvider {
   private _flags: Map<string, InMemoryFlagDefinition> = new Map();
-  // Subscribers are keyed by identity userId. Multiple subscribers for
-  // the same userId are supported (tests frequently register more than
-  // one), so each value is a Set.
+  // Subscribers are keyed by the canonical identity key (userId +
+  // serialized attrs). Two identities sharing the same userId but
+  // differing on attrs are tracked separately — the per-rule
+  // predicate may evaluate to different values for them, so they
+  // must not share a bucket. Aligned with FlagsmithProvider /
+  // UnleashProvider, which use the same `_identityKey`.
   private _subscribers: Map<string, Set<{ identity: FlagIdentity; onChange: (next: FlagMap) => void }>> = new Map();
+  private _disposed = false;
 
   constructor(options: InMemoryFlagProviderOptions = {}) {
     for (const def of options.flags ?? []) {
@@ -51,6 +57,7 @@ export class InMemoryFlagProvider implements FlagProvider {
   }
 
   async identify(identity: FlagIdentity): Promise<FlagMap> {
+    if (this._disposed) raiseError("InMemoryFlagProvider: provider has been disposed.");
     return this._evaluate(identity);
   }
 
@@ -65,23 +72,30 @@ export class InMemoryFlagProvider implements FlagProvider {
     // `setFlags`, never from a polling diff.
     _initial?: FlagMap,
   ): FlagUnsubscribe {
-    const bucket = this._subscribers.get(identity.userId) ?? new Set();
+    if (this._disposed) {
+      raiseError("InMemoryFlagProvider: cannot subscribe on a disposed provider.");
+    }
+    const key = _identityKey(identity);
+    const bucket = this._subscribers.get(key) ?? new Set();
     const entry = { identity, onChange };
     bucket.add(entry);
-    this._subscribers.set(identity.userId, bucket);
+    this._subscribers.set(key, bucket);
     return () => {
-      const current = this._subscribers.get(identity.userId);
+      const current = this._subscribers.get(key);
       if (!current) return;
       current.delete(entry);
-      if (current.size === 0) this._subscribers.delete(identity.userId);
+      if (current.size === 0) this._subscribers.delete(key);
     };
   }
 
   async reload(identity: FlagIdentity): Promise<FlagMap> {
+    if (this._disposed) raiseError("InMemoryFlagProvider: provider has been disposed.");
     return this._evaluate(identity);
   }
 
   dispose(): void {
+    if (this._disposed) return;
+    this._disposed = true;
     this._subscribers.clear();
     this._flags.clear();
   }
@@ -90,9 +104,16 @@ export class InMemoryFlagProvider implements FlagProvider {
 
   /**
    * Replace the value (or default value) of a single flag and notify
-   * every subscriber with a freshly evaluated map.
+   * every subscriber with a freshly evaluated map. After `dispose()`
+   * this is an explicit no-op — `dispose()` clears `_flags` and
+   * `_subscribers`, so a write here would otherwise either revive
+   * the provider (writing into the cleared flag map without any live
+   * subscribers) or silently drop the notification by virtue of an
+   * empty subscriber set. The explicit guard keeps the post-dispose
+   * contract obvious to future readers.
    */
   setFlag<T extends FlagValue>(key: string, defaultValue: T): void {
+    if (this._disposed) return;
     const existing = this._flags.get(key);
     if (existing) {
       this._flags.set(key, { ...existing, defaultValue });
@@ -104,9 +125,11 @@ export class InMemoryFlagProvider implements FlagProvider {
 
   /**
    * Replace the full flag set with a new list of definitions and notify
-   * every subscriber.
+   * every subscriber. After `dispose()` this is an explicit no-op —
+   * see {@link setFlag} for the rationale.
    */
   setFlags(flags: InMemoryFlagDefinition[]): void {
+    if (this._disposed) return;
     this._flags.clear();
     for (const def of flags) this._flags.set(def.key, def);
     this._notifyAll();
@@ -118,7 +141,23 @@ export class InMemoryFlagProvider implements FlagProvider {
       let value: FlagValue = def.defaultValue;
       if (def.rules) {
         for (const rule of def.rules) {
-          if (rule.predicate(identity)) {
+          // `predicate` is caller-supplied — a thrown predicate must
+          // not break evaluation for the rest of the flag set or
+          // (via `_notifyAll`) for sibling subscribers. Skip the
+          // rule on throw, surface a console.warn so misbehaving
+          // rules stay visible, and fall through to the next rule
+          // (or the default value if none match).
+          let matched = false;
+          try {
+            matched = rule.predicate(identity);
+          } catch (err) {
+            console.warn(
+              `[@csbc-dev/feature-flags] InMemoryFlagProvider: rule predicate for "${def.key}" threw and was skipped.`,
+              err,
+            );
+            continue;
+          }
+          if (matched) {
             value = rule.value;
             break;
           }
@@ -139,8 +178,13 @@ export class InMemoryFlagProvider implements FlagProvider {
   }
 
   private _notifyAll(): void {
-    for (const bucket of this._subscribers.values()) {
-      for (const { identity, onChange } of bucket) {
+    // Snapshot both the bucket map and each subscriber set before
+    // iterating: a synchronous unsubscribe from inside an `onChange`
+    // handler can delete an empty bucket from the outer Map (see the
+    // unsubscribe closure in `subscribe`), which would otherwise
+    // mutate the live Map under the outer for-of cursor.
+    for (const bucket of Array.from(this._subscribers.values())) {
+      for (const { identity, onChange } of Array.from(bucket)) {
         // Each subscriber is re-evaluated independently because rules
         // can produce different values per identity.
         onChange(this._evaluate(identity));

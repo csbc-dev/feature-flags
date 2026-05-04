@@ -2,6 +2,7 @@ import { bind } from "@wc-bindable/core";
 import type { UnbindFn } from "@wc-bindable/core";
 import type { RemoteCoreProxy } from "@wc-bindable/remote";
 import { deepCloneAndFreeze } from "../freeze.js";
+import { raiseError } from "../raiseError.js";
 import type { FlagMap, IWcBindable } from "../types.js";
 
 const EMPTY_FLAGS: FlagMap = Object.freeze({});
@@ -10,7 +11,7 @@ const EMPTY_FLAGS: FlagMap = Object.freeze({});
  * Element structurally matching `<auth0-session>`'s public surface.
  * Any element exposing `.proxy`, `.ready`, and the
  * `auth0-session:ready-changed` event works as a target — we do
- * not take a hard dependency on `@wc-bindable/auth0` so tests
+ * not take a hard dependency on `@csbc-dev/auth0` so tests
  * (and future non-Auth0 session elements) can stand in their own
  * session-shaped host.
  */
@@ -83,8 +84,10 @@ export class Flags extends HTMLElement {
   // Polling timer paired with `_pendingTargetObserver`. Catches the
   // case where the target *element* already exists but its `.proxy`
   // / `.ready` are assigned imperatively later — property writes
-  // are invisible to MutationObserver.
-  private _pendingTargetPollTimer: ReturnType<typeof setInterval> | null = null;
+  // are invisible to MutationObserver. Implemented as a self-rearming
+  // setTimeout chain so the delay can grow exponentially under a
+  // misconfigured target without burning CPU.
+  private _pendingTargetPollTimer: ReturnType<typeof setTimeout> | null = null;
   // Hard cap on the rescue lifetime so a misconfigured `target`
   // (pointing at an id that never arrives) does not keep a 200 ms
   // interval alive forever — 30 s is generous for any plausible
@@ -130,8 +133,8 @@ export class Flags extends HTMLElement {
   async identify(userId: string, attrs?: Record<string, unknown>): Promise<void> {
     const proxy = this._sessionEl?.proxy;
     if (!proxy) {
-      throw new Error(
-        "[@csbc-dev/feature-flags] <feature-flags>: identify() called before a session proxy is attached. Wait for the target session's ready=true.",
+      raiseError(
+        "<feature-flags>: identify() called before a session proxy is attached. Wait for the target session's ready=true.",
       );
     }
     await proxy.invoke("identify", userId, attrs);
@@ -144,8 +147,8 @@ export class Flags extends HTMLElement {
   async reload(): Promise<void> {
     const proxy = this._sessionEl?.proxy;
     if (!proxy) {
-      throw new Error(
-        "[@csbc-dev/feature-flags] <feature-flags>: reload() called before a session proxy is attached. Wait for the target session's ready=true.",
+      raiseError(
+        "<feature-flags>: reload() called before a session proxy is attached. Wait for the target session's ready=true.",
       );
     }
     await proxy.invoke("reload");
@@ -218,6 +221,18 @@ export class Flags extends HTMLElement {
         this._bindToProxy();
       } else if (next === false) {
         this._unbindFromProxy();
+        // ready=false signals the session has lost its proxy. `flags`
+        // is intentionally retained (last-known map matches the
+        // documented "initial value is not cleared on a dropped
+        // transport" contract), but `identified` / `loading` describe
+        // the LIVE session state and would otherwise stay stuck at
+        // their pre-drop values until a new proxy attaches and
+        // re-publishes. Scoped to the ready=false path so a target
+        // change re-attach (which also calls `_unbindFromProxy` via
+        // `_detach`) does NOT briefly flip `identified` / `loading`
+        // to false between detach and re-bind.
+        this._setIdentified(false);
+        this._setLoading(false);
       }
     };
     this._readyListener = listener;
@@ -289,7 +304,7 @@ export class Flags extends HTMLElement {
       this._pendingTargetObserver = null;
     }
     if (this._pendingTargetPollTimer) {
-      clearInterval(this._pendingTargetPollTimer);
+      clearTimeout(this._pendingTargetPollTimer);
       this._pendingTargetPollTimer = null;
     }
     if (this._pendingTargetTimeoutTimer) {
@@ -364,30 +379,57 @@ export class Flags extends HTMLElement {
     });
     this._pendingTargetObserver = observer;
 
-    // 200 ms poll covers property-level upgrades (assignments /
-    // custom-element upgrades). Fast enough that a user's first
-    // render tick catches the upgrade, low enough that an indefinite
-    // miss is negligible cost. `.unref()` on platforms that support
-    // it (Node) so a lingering rescue does not keep the process
-    // alive past the intended exit.
-    const poll = setInterval(tryResolve, 200);
-    const t = poll as unknown as { unref?: () => void };
-    /* v8 ignore start -- `unref` is a Node-only extension; happy-dom / real browsers do not expose it */
-    if (typeof t.unref === "function") t.unref();
-    /* v8 ignore stop */
-    this._pendingTargetPollTimer = poll;
+    // Exponential-backoff poll covers property-level upgrades
+    // (assignments / custom-element upgrades) that MutationObserver
+    // cannot see. Starts at 200 ms — fast enough for the first render
+    // tick to catch the upgrade — then doubles up to a 2 s ceiling so
+    // a misconfigured `target` on a long-lived page costs only a
+    // handful of wakeups per minute instead of one every 200 ms.
+    // Re-armed via `setTimeout` chaining; teardown clears the latest
+    // timer through `_pendingTargetPollTimer`.
+    let nextDelay = 200;
+    const POLL_MAX_DELAY_MS = 2_000;
+    const schedulePoll = (): void => {
+      const handle = setTimeout(() => {
+        tryResolve();
+        // Bail out if a teardown path (resolved, generation drift,
+        // detach, hard-cap timeout) ran between scheduling and firing,
+        // OR if `tryResolve()` synchronously re-armed the rescue (e.g.
+        // a successful resolve called `_attach()` → `_detach()` →
+        // a new `_waitForTarget()` cycle replaced the timer). The
+        // strict identity check `!== handle` distinguishes "I am still
+        // the latest scheduled timer" from "someone else already owns
+        // the slot" — without it, a re-armed slot would get a second
+        // re-arm chained on top.
+        if (this._pendingTargetPollTimer !== handle) return;
+        nextDelay = Math.min(nextDelay * 2, POLL_MAX_DELAY_MS);
+        schedulePoll();
+      }, nextDelay);
+      const t = handle as unknown as { unref?: () => void };
+      /* v8 ignore start -- `unref` is a Node-only extension; happy-dom / real browsers do not expose it */
+      if (typeof t.unref === "function") t.unref();
+      /* v8 ignore stop */
+      this._pendingTargetPollTimer = handle;
+    };
+    schedulePoll();
 
     // Hard cap the rescue: if `target` is pointed at an id that never
     // arrives, we refuse to keep polling forever. 30 s is well past
     // any plausible framework / SSR hydration cycle — a target that
     // hasn't shown up by then is a configuration error, not a timing
     // race. Tears down both triggers so CPU/battery stay bounded on
-    // long-lived pages with many mis-targeted elements.
+    // long-lived pages with many mis-targeted elements. We also
+    // surface a final `error` so consumers binding to it observe a
+    // distinct "we gave up" state instead of the original "did not
+    // resolve" message they may already have cleared.
     const timeout = setTimeout(() => {
       /* v8 ignore start -- defensive: _stopWaitingForTarget clears this timer before generation can drift, so a stale myGen here is not deterministically reachable */
       if (this._generation !== myGen) return;
       /* v8 ignore stop */
       this._stopWaitingForTarget();
+      this._setError(new Error(
+        `[@csbc-dev/feature-flags] <feature-flags>: target "${this.target}" did not resolve within 30s; giving up.`,
+      ));
     }, 30_000);
     const tt = timeout as unknown as { unref?: () => void };
     /* v8 ignore start -- `unref` is a Node-only extension; happy-dom / real browsers do not expose it */
@@ -478,8 +520,39 @@ function _asFlagMap(value: unknown): FlagMap {
 function _asErrorOrNull(value: unknown): Error | null {
   if (value === null || value === undefined) return null;
   if (value instanceof Error) return value;
-  // Remote errors are revived into plain `Error` by RemoteCoreProxy,
-  // but a user-code provider might dispatch a non-Error value. Wrap
-  // for a consistent observable contract.
-  return new Error(typeof value === "string" ? value : String(value));
+  if (typeof value === "string") return new Error(value);
+  if (typeof value === "object") {
+    // Prefer an explicit `message` field — covers Error-shaped POJOs
+    // and remote errors deserialized as plain objects. Restore `name`
+    // and `cause` from the same payload so consumers can still
+    // distinguish AbortError / TypeError / etc. after the round-trip
+    // through the wire flattens the prototype chain. `cause` is
+    // forwarded as a shallow value (no recursive rebuild) — we trust
+    // the producer to keep it shallow; pathological cycles would
+    // already have failed serialization upstream.
+    const msg = (value as { message?: unknown }).message;
+    if (typeof msg === "string" && msg.length > 0) {
+      return _restoreErrorMeta(new Error(msg), value);
+    }
+    // Fall back to `String(value)` so callers that supply a custom
+    // toString() still surface a useful message. If the result is the
+    // useless `[object Object]`, JSON-stringify the payload so plain
+    // objects are not silently flattened to that sentinel.
+    const s = String(value);
+    if (s !== "[object Object]") return new Error(s);
+    try { return new Error(JSON.stringify(value)); } catch { return new Error(s); }
+  }
+  return new Error(String(value));
+}
+
+function _restoreErrorMeta(err: Error, source: unknown): Error {
+  const name = (source as { name?: unknown }).name;
+  if (typeof name === "string" && name.length > 0) err.name = name;
+  // `cause` is structurally optional on Error in ES2022. Use the
+  // bracket form so older lib targets accept the assignment without a
+  // declaration merge.
+  if ("cause" in (source as object)) {
+    (err as Error & { cause?: unknown }).cause = (source as { cause?: unknown }).cause;
+  }
+  return err;
 }

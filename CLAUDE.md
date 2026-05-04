@@ -159,7 +159,7 @@ Running the targeting evaluation in the browser leaks two things:
 
 ### Composition pattern
 
-The canonical setup pairs `<feature-flags>` with `@wc-bindable/auth0`:
+The canonical setup pairs `<feature-flags>` with `@csbc-dev/auth0`:
 
 ```html
 <auth0-gate    id="auth"          domain="..." client-id="..." remote-url="wss://api.example.com/flags"></auth0-gate>

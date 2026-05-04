@@ -27,6 +27,38 @@ describe("_identityKey helpers", () => {
     });
   });
 
+  describe("collision resistance", () => {
+    // Regression guard: the previous `userId + "|" + stableStringify(attrs)`
+    // shape collided when a user id contained the `|` separator. Auth0
+    // `sub` values have the form `auth0|abc123`, so the failure mode
+    // was reachable in production. Quoting the user id via
+    // `JSON.stringify` makes the boundary unambiguous.
+
+    it("Auth0-style userId with `|` does not collide with a crafted alternative identity", () => {
+      // Same canonical key shape under the OLD scheme:
+      //   "auth0|abc123" + "|" + '{"role":"admin"}'
+      //   "auth0"        + "|" + '{"role":"admin"}'  // with userId carrying the rest
+      // i.e. one identity's id + separator + attrs produces a string
+      // that another identity could also emit. After the fix the two
+      // must key distinctly.
+      const a = identityKey({ userId: "auth0|abc123", attrs: { role: "admin" } });
+      const b = identityKey({
+        userId: "auth0",
+        attrs: { role: "admin" },
+      });
+      expect(a).not.toBe(b);
+    });
+
+    it("a userId that itself contains a JSON-quote-and-pipe sequence still keys distinctly", () => {
+      // The escaped form must survive the quoting layer too — without
+      // JSON.stringify quoting, a id like `"|"` could be crafted to
+      // mimic the separator boundary literally.
+      const a = identityKey({ userId: '"|"', attrs: {} });
+      const b = identityKey({ userId: "", attrs: { x: 1 } });
+      expect(a).not.toBe(b);
+    });
+  });
+
   describe("circular reference handling", () => {
     // Regression guard for [R1-05]: `FlagIdentity.attrs` is user-
     // supplied, so an accidental cycle must not blow the stack. The

@@ -131,6 +131,17 @@ describe("UnleashProvider", () => {
       new UnleashProvider({ url: "http://u", appName: "app" });
       expect(mockControl.constructor).not.toHaveBeenCalled();
     });
+
+    it("rejects non-finite or negative refreshInterval at construction", () => {
+      expect(() => new UnleashProvider({ url: "http://u", appName: "app", refreshInterval: -1 })).toThrow(/refreshInterval/);
+      expect(() => new UnleashProvider({ url: "http://u", appName: "app", refreshInterval: NaN })).toThrow(/refreshInterval/);
+      expect(() => new UnleashProvider({ url: "http://u", appName: "app", refreshInterval: Number.POSITIVE_INFINITY })).toThrow(/refreshInterval/);
+    });
+
+    it("rejects non-finite or negative metricsInterval at construction", () => {
+      expect(() => new UnleashProvider({ url: "http://u", appName: "app", metricsInterval: -100 })).toThrow(/metricsInterval/);
+      expect(() => new UnleashProvider({ url: "http://u", appName: "app", metricsInterval: NaN })).toThrow(/metricsInterval/);
+    });
   });
 
   describe("identify", () => {

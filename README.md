@@ -26,7 +26,7 @@ Feature-flag services let you write targeting rules like *"enable this for users
 
 ## Three-layer composition
 
-The canonical setup pairs `<feature-flags>` with `@wc-bindable/auth0`:
+The canonical setup pairs `<feature-flags>` with `@csbc-dev/auth0`:
 
 ```html
 <auth0-gate id="auth"
@@ -58,7 +58,7 @@ The canonical setup pairs `<feature-flags>` with `@wc-bindable/auth0`:
 - `<auth0-session>` collapses the three-stage readiness sequence (authenticated → connected → synced) into a single `ready` signal.
 - `<feature-flags>` subscribes to the session's `RemoteCoreProxy` and re-dispatches flag events onto itself so `data-wcs` works.
 
-The WebSocket URL is defined by `<auth0-gate>`'s `remote-url`. Use the standard `@wc-bindable/auth0/server` handshake — your `createCores` factory returns a `FlagsCore`.
+The WebSocket URL is defined by `<auth0-gate>`'s `remote-url`. Use the standard `@csbc-dev/auth0/server` handshake — your `createCores` factory returns a `FlagsCore`.
 
 ## Schema-less design
 
@@ -93,14 +93,14 @@ npm install unleash-client                # Unleash
 npm install @launchdarkly/node-server-sdk # LaunchDarkly
 ```
 
-Any transport-layer dependency already comes from `@wc-bindable/auth0` (via `@wc-bindable/remote`); `@csbc-dev/feature-flags` does not open its own socket.
+Any transport-layer dependency already comes from `@csbc-dev/auth0` (via `@wc-bindable/remote`); `@csbc-dev/feature-flags` does not open its own socket.
 
 ## Server setup (Flagsmith)
 
 > **Always import from `@csbc-dev/feature-flags/server` on Node.** The root entry re-exports the `<feature-flags>` custom element, which extends `HTMLElement`; importing it in a Node-only runtime fails with `ReferenceError: HTMLElement is not defined`. The `/server` subpath exports only DOM-free artifacts (`FlagsCore`, providers, types) and loads cleanly under Node, Bun, Deno, and Cloudflare Workers.
 
 ```ts
-import { createAuthenticatedWSS } from "@wc-bindable/auth0/server";
+import { createAuthenticatedWSS } from "@csbc-dev/auth0/server";
 import { FlagsCore, FlagsmithProvider } from "@csbc-dev/feature-flags/server";
 
 const provider = new FlagsmithProvider({
@@ -126,7 +126,7 @@ createAuthenticatedWSS({
 Register the `FlagsCore` declaration on the client:
 
 ```ts
-import { registerCoreDeclaration, bootstrapAuth } from "@wc-bindable/auth0";
+import { registerCoreDeclaration, bootstrapAuth } from "@csbc-dev/auth0";
 import { FlagsCore } from "@csbc-dev/feature-flags/server";
 import { bootstrapFlags } from "@csbc-dev/feature-flags";
 
@@ -164,14 +164,18 @@ The `realtime: true` option is accepted on `FlagsmithProviderOptions` for forwar
 
 - **Provider failures** (`identify` / `subscribe` / `reload`) do not reject on the shell — they are published to `error` / `feature-flags:error` and clear `loading`. Bind the state; do not `try / catch` these.
 - **Transport failures** are handled one layer up by `<auth0-session>` — its `connected-changed: false` unwinds the subscription and the last-known flag map is retained until a fresh session lights up.
-- **Precondition violations** (missing provider, dispose-after-use) throw synchronously.
+- **Precondition violations** (missing provider, dispose-after-use, `<feature-flags>.identify()` / `.reload()` invoked before a session proxy has attached, `setConfig({ tagNames: { flags: "" } })`) throw synchronously.
+- **Target resolution failures** are not fatal: `<feature-flags target="...">` first emits a `did not resolve` error and rescues for up to **30 s** (DOM mutation observer + exponential-backoff property-poll). If the target still has not resolved by then, a final `did not resolve within 30s; giving up.` error is published and rescue stops. Bind `error` to surface either state.
+- **Remote errors** received as plain JSON objects (the wire flattens the prototype chain) are re-hydrated into `Error` instances on the shell with `message` / `name` / `cause` restored, so `error instanceof Error` and `.name === "AbortError"` continue to discriminate after a remote round-trip.
+- **LaunchDarkly option validation**: `contextKind: "multi"` is reserved for multi-kind contexts and rejected at construction; `pollInterval` / `initializationTimeoutMs` reject `NaN`, `Infinity`, and negative values (Flagsmith / Unleash do the same for their interval options).
+- **Identity attribute coercion**: Flagsmith / Unleash stringify trait values into their respective context shapes — `bigint` traits are coerced via `String(v)` rather than rejected, so `BigInt(42)` round-trips as the string `"42"` instead of throwing.
 
 ## Server setup (Unleash)
 
 Same shape as Flagsmith — just swap the Provider. Unleash's own SDK centralizes upstream polling on a single `refreshInterval`, so the Provider subscribes once to the SDK's `changed` event and fans out to every per-identity bucket. No per-identity timer.
 
 ```ts
-import { createAuthenticatedWSS } from "@wc-bindable/auth0/server";
+import { createAuthenticatedWSS } from "@csbc-dev/auth0/server";
 import { FlagsCore, UnleashProvider } from "@csbc-dev/feature-flags/server";
 
 const provider = new UnleashProvider({
@@ -212,7 +216,7 @@ Each Unleash flag becomes `{ enabled, value }`, where `value` is `variant.payloa
 Same shape as Flagsmith / Unleash — swap the Provider. LaunchDarkly's Node SDK streams upstream flag updates by default and emits `update` on every change, so fan-out is event-driven (no per-identity timer).
 
 ```ts
-import { createAuthenticatedWSS } from "@wc-bindable/auth0/server";
+import { createAuthenticatedWSS } from "@csbc-dev/auth0/server";
 import { FlagsCore, LaunchDarklyProvider } from "@csbc-dev/feature-flags/server";
 
 const provider = new LaunchDarklyProvider({

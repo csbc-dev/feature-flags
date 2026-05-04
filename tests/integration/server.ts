@@ -103,7 +103,17 @@ export function startServer(port: number): Promise<{
   port: number;
 }> {
   return new Promise((resolve) => {
-    const repoRoot = path.resolve(import.meta.dirname, "../../../../");
+    // After the monorepo → standalone-package split, `@wc-bindable/core`
+    // and `@wc-bindable/remote` ship as installed npm dependencies, not
+    // sibling workspace packages. The integration client.html still
+    // resolves them via `/packages/<name>/...` URLs (matching the wire
+    // format the original monorepo dev server used) — we satisfy that
+    // contract by rewriting the URL prefix to the installed location
+    // under `node_modules/@wc-bindable/<name>/`.
+    const wcBindableRoot = path.resolve(
+      import.meta.dirname,
+      "../../node_modules/@wc-bindable",
+    );
     const integrationDir = import.meta.dirname;
 
     const sessions = new Map<string, Session>();
@@ -146,9 +156,13 @@ export function startServer(port: number): Promise<{
         return;
       }
 
-      // Route: /packages/... (serve built dist files)
+      // Route: /packages/<name>/... → node_modules/@wc-bindable/<name>/...
+      // The leading `/packages/` prefix is stripped and the remainder
+      // resolved against `node_modules/@wc-bindable` so e.g.
+      // `/packages/core/dist/index.js` becomes
+      // `node_modules/@wc-bindable/core/dist/index.js`.
       if (url.startsWith("/packages/")) {
-        const file = path.join(repoRoot, url);
+        const file = path.join(wcBindableRoot, url.slice("/packages/".length));
         if (fs.existsSync(file)) {
           const ext = path.extname(file);
           res.writeHead(200, { "Content-Type": MIME[ext] ?? "application/octet-stream" });

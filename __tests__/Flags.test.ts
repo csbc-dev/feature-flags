@@ -435,6 +435,92 @@ describe("<feature-flags>", () => {
     expect(el.error?.message).toContain("boom");
   });
 
+  it("unwraps the .message field from Error-shaped POJO payloads", async () => {
+    // Remote-mode delivers errors as deserialized plain objects with
+    // a string `message` — we must pull that out rather than fall
+    // through to the `String(value)` / JSON branches.
+    const sess = makeSession();
+    const el = makeFlagsEl();
+    sess.ready = true;
+    await flush();
+    sess.proxy!._publish("error", { message: "remote boom", name: "Error" });
+    expect(el.error?.message).toBe("remote boom");
+  });
+
+  it("restores .name and .cause on Error-shaped POJO payloads", async () => {
+    // Remote-mode flattens the Error prototype chain to a POJO; the
+    // unwrap path must put the discriminator back so consumers can
+    // still tell e.g. AbortError from a generic Error.
+    const sess = makeSession();
+    const el = makeFlagsEl();
+    sess.ready = true;
+    await flush();
+    sess.proxy!._publish("error", {
+      message: "fetch aborted",
+      name: "AbortError",
+      cause: { code: "ABORT" },
+    });
+    expect(el.error?.message).toBe("fetch aborted");
+    expect(el.error?.name).toBe("AbortError");
+    expect((el.error as Error & { cause?: unknown }).cause).toEqual({ code: "ABORT" });
+  });
+
+  it("ignores empty / non-string .name and absent .cause on Error-shaped POJO payloads", async () => {
+    // Empty `name` falls back to the synthesised Error's default
+    // ("Error"); `cause` is left untouched when the payload does not
+    // declare it.
+    const sess = makeSession();
+    const el = makeFlagsEl();
+    sess.ready = true;
+    await flush();
+    sess.proxy!._publish("error", { message: "boom", name: "" });
+    expect(el.error?.message).toBe("boom");
+    expect(el.error?.name).toBe("Error");
+    expect("cause" in (el.error as object)).toBe(false);
+  });
+
+  it("JSON-stringifies plain-object error payloads whose String() collapses to [object Object]", async () => {
+    // A vanilla `{ code, detail }` payload (no `message`, default
+    // `toString`) yields the useless "[object Object]" sentinel via
+    // `String(value)`. The wrap path falls back to `JSON.stringify`
+    // so the actual fields stay observable to consumers binding to
+    // `feature-flags:error`.
+    const sess = makeSession();
+    const el = makeFlagsEl();
+    sess.ready = true;
+    await flush();
+    sess.proxy!._publish("error", { code: 503, detail: "bad gateway" });
+    expect(el.error?.message).toBe('{"code":503,"detail":"bad gateway"}');
+  });
+
+  it("falls back to String() when JSON.stringify throws on the [object Object] payload", async () => {
+    // Cyclic plain object: `String(value)` is "[object Object]" so
+    // the JSON branch is taken, but `JSON.stringify` throws on the
+    // cycle. The catch keeps the wrap from propagating and surfaces
+    // the sentinel string rather than swallowing the error entirely.
+    const sess = makeSession();
+    const el = makeFlagsEl();
+    sess.ready = true;
+    await flush();
+    const cyclic: Record<string, unknown> = {};
+    cyclic.self = cyclic;
+    sess.proxy!._publish("error", cyclic);
+    expect(el.error?.message).toBe("[object Object]");
+  });
+
+  it("wraps primitive non-string error payloads via String()", async () => {
+    // Numbers / booleans / bigints / symbols hit the final fallback
+    // (neither null/undefined, nor Error, nor string, nor object).
+    // They must surface as `new Error(String(value))` rather than
+    // being silently dropped.
+    const sess = makeSession();
+    const el = makeFlagsEl();
+    sess.ready = true;
+    await flush();
+    sess.proxy!._publish("error", 42);
+    expect(el.error?.message).toBe("42");
+  });
+
   it("clearing error back to null is idempotent", async () => {
     const sess = makeSession();
     const el = makeFlagsEl();

@@ -13,7 +13,11 @@ import type { FlagIdentity } from "../types.js";
  * the same canonicalization rules.
  */
 export function identityKey(identity: FlagIdentity): string {
-  return identity.userId + "|" + stableStringify(identity.attrs ?? {});
+  // `JSON.stringify(userId)` quotes and escapes the id so user ids
+  // containing the `|` separator (notably Auth0 `sub` values shaped
+  // like `auth0|abc123`) cannot collide with another identity whose
+  // id + attrs concatenate to the same raw string.
+  return JSON.stringify(identity.userId) + "|" + stableStringify(identity.attrs ?? {});
 }
 
 /**
@@ -33,6 +37,14 @@ export function stableStringify(obj: Record<string, unknown>): string {
   return _stableValueImpl(obj, new WeakSet());
 }
 
+/**
+ * Test-only entry point for the underlying value-serializer. Production
+ * callers should use {@link stableStringify}, which constrains the input
+ * to a `Record<string, unknown>` (matching `FlagIdentity.attrs` and
+ * polling-bucket flag maps) and is the only shape used by the providers.
+ * Exposed solely so unit tests can exercise primitive / array / cycle
+ * paths without indirecting through an enclosing object.
+ */
 export function stableValue(v: unknown): string {
   return _stableValueImpl(v, new WeakSet());
 }

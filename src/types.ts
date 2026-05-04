@@ -58,7 +58,7 @@ export type FlagMap = Readonly<Record<string, FlagValue>>;
  * country, etc.) that the provider can use as rule inputs.
  *
  * When {@link FlagsCore} is constructed with a `userContext` from
- * `@wc-bindable/auth0`, `identify()` is called automatically
+ * `@csbc-dev/auth0`, `identify()` is called automatically
  * with `userContext.sub` as `userId` and a Flagsmith-style trait
  * flattening of `email` / `name` / `permissions` / `roles` / `orgId`.
  */
@@ -108,7 +108,7 @@ export interface FlagProvider {
 
 /**
  * Minimal shape of the `UserContext` produced by
- * `@wc-bindable/auth0`'s `verifyAuth0Token()`. Typed structurally
+ * `@csbc-dev/auth0`'s `verifyAuth0Token()`. Typed structurally
  * here so `@csbc-dev/feature-flags` does not depend on auth0-gate at
  * the package level — server integrations can pass the real UserContext
  * and it will structurally satisfy this.
@@ -203,7 +203,15 @@ export interface UnleashProviderOptions {
   metricsInterval?: number;
   /** Custom HTTP headers for upstream requests. */
   customHeaders?: Record<string, string>;
-  /** Async header provider (e.g. rotating JWTs). */
+  /**
+   * Async header provider (e.g. rotating JWTs). When supplied, some
+   * `unleash-client` versions consult this function on every request
+   * instead of merging it with `customHeaders`, which means the
+   * `Authorization` header derived from `clientKey` may not be applied.
+   * Callers using `customHeadersFunction` together with `clientKey`
+   * must include the `Authorization` entry themselves inside the
+   * function's returned headers map.
+   */
   customHeadersFunction?: () => Promise<Record<string, string>>;
   /** Suppress metrics publishing entirely. */
   disableMetrics?: boolean;

@@ -74,6 +74,13 @@ export class FlagsCore extends EventTarget {
   // in-flight promise, not race parallel provider calls.
   private _autoIdentifyPromise: Promise<void> | null = null;
 
+  // Tracks any in-flight provider call (identify / reload) so dispose()
+  // can await their settlement before tearing the provider down. A
+  // single-slot field would lose track of a prior call when a newer
+  // identify() overwrites it, leaving the original promise un-awaited
+  // by dispose() and re-opening the late-provider-call race.
+  private _inFlight: Set<Promise<unknown>> = new Set();
+
   constructor(options: FlagsCoreOptions) {
     super();
     if (!options || !options.provider) {
@@ -162,14 +169,22 @@ export class FlagsCore extends EventTarget {
       const myGen = this._generation;
       this._setError(null);
       this._setLoading(true);
+      // Wrap the provider call itself in the try so a synchronous
+      // throw from `provider.reload(identity)` is caught by the same
+      // path as an async rejection. Without this, a sync-throwing
+      // provider would bypass `finally` and leave `loading=true`.
+      let reloadPromise: Promise<FlagMap> | null = null;
       try {
-        const next = await this._provider.reload(identity);
+        reloadPromise = this._provider.reload(identity);
+        this._inFlight.add(reloadPromise);
+        const next = await reloadPromise;
         if (this._generation !== myGen) return;
         this._publishFlags(next);
       } catch (err) {
         if (this._generation !== myGen) return;
         this._setError(err instanceof Error ? err : new Error(String(err)));
       } finally {
+        if (reloadPromise) this._inFlight.delete(reloadPromise);
         if (this._generation === myGen) this._setLoading(false);
       }
       return;
@@ -194,6 +209,7 @@ export class FlagsCore extends EventTarget {
    * callers share the same in-flight promise.
    */
   async ensureIdentified(): Promise<void> {
+    if (this._disposed) return;
     if (this._identified || !this._userContext) return;
     if (this._autoIdentifyPromise) return this._autoIdentifyPromise;
     this._autoIdentifyPromise = this._autoIdentify();
@@ -218,8 +234,18 @@ export class FlagsCore extends EventTarget {
     // A change in `raw` alone (non-RBAC claims) doesn't warrant a
     // re-identify — the provider's attrs surface only carries the
     // structured RBAC / profile fields.
+    //
+    // Compare against `_currentIdentity` as well: a manual
+    // `identify("bob")` overrides the userContext-derived identity
+    // without touching `_userContext`, so a subsequent token-refresh
+    // for the original user (alice) would otherwise match `prev`
+    // exactly and no-op, leaving the Core wedged on bob's flag map
+    // while the live session is back to alice. Forcing a re-identify
+    // when `_currentIdentity` has drifted from `user.sub` keeps
+    // `_currentIdentity` and `_userContext` in sync after a refresh.
     if (
       prev &&
+      this._currentIdentity?.userId === user.sub &&
       prev.sub === user.sub &&
       prev.email === user.email &&
       prev.name === user.name &&
@@ -245,6 +271,18 @@ export class FlagsCore extends EventTarget {
     this._disposed = true;
     this._generation++;
     this._autoIdentifyPromise = null;
+
+    // Wait for every in-flight provider call (identify / reload) to
+    // settle before tearing the provider down — otherwise a late
+    // provider call would land on an already-disposed Provider.
+    // `allSettled` so a rejection in any one in-flight does not
+    // short-circuit the wait on the others. Generation guards already
+    // prevent state corruption; this prevents the misordered call
+    // into the SDK.
+    if (this._inFlight.size > 0) {
+      await Promise.allSettled([...this._inFlight]);
+    }
+    this._inFlight.clear();
 
     if (this._unsubscribeProvider) {
       try {
@@ -297,9 +335,16 @@ export class FlagsCore extends EventTarget {
     this._setLoading(true);
 
     let initial: FlagMap;
+    // Wrap the provider call itself in the try so a synchronous
+    // throw from `provider.identify(identity)` is caught here rather
+    // than escaping `_doIdentify` with `loading=true` left on.
+    let identifyPromise: Promise<FlagMap> | null = null;
     try {
-      initial = await this._provider.identify(identity);
+      identifyPromise = this._provider.identify(identity);
+      this._inFlight.add(identifyPromise);
+      initial = await identifyPromise;
     } catch (err) {
+      if (identifyPromise) this._inFlight.delete(identifyPromise);
       if (this._generation !== myGen) return;
       // The identify cycle for `identity` did NOT commit a flag map.
       // We already tore down the previous identity's subscription and
@@ -322,6 +367,9 @@ export class FlagsCore extends EventTarget {
       this._setLoading(false);
       return;
     }
+    // identifyPromise is non-null here: assignment happened before
+    // the awaited call that resolved successfully.
+    this._inFlight.delete(identifyPromise!);
 
     if (this._generation !== myGen) return;
 

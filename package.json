@@ -3,6 +3,13 @@
   "version": "0.4.0",
   "description": "Declarative feature flag observation component for Web Components. Server-side flag evaluation, reactive browser-side surface via wc-bindable-protocol.",
   "type": "module",
+  "engines": {
+    "node": ">=18"
+  },
+  "sideEffects": [
+    "./dist/registerComponents.js",
+    "./dist/components/Flags.js"
+  ],
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "exports": {

@@ -2,21 +2,13 @@
 //
 // --- Optional peer deps in tests -----------------------------------
 //
-// Both `flagsmith-nodejs` and `unleash-client` are declared as
-// OPTIONAL peer deps in `package.json`. Their `devDependencies`
-// status differs, but that difference is NOT what makes the tests
-// work — both paths rely on Vitest's `vi.mock(specifier, factory)`
-// virtual-module support, which serves the factory's return value
-// when no physical module is resolved on disk.
-//
-//   * `unleash-client`  — not listed in devDependencies. Tests
-//     succeed via the vi.mock virtual module alone.
-//   * `flagsmith-nodejs` — listed in devDependencies (historical),
-//     but tests do NOT depend on that declaration: the suite still
-//     passes when the package is absent from `node_modules/`, which
-//     is the de-facto state of this workspace. Treat the devDep line
-//     as vestigial — removing it would not break tests, and the
-//     invariant the tests enforce is "virtual mock only".
+// `flagsmith-nodejs`, `unleash-client`, and `@launchdarkly/node-server-sdk`
+// are declared as OPTIONAL peer deps in `package.json`. None of them
+// are listed in `devDependencies`, so they are absent from
+// `node_modules/` in this workspace. The provider test suites work
+// regardless via Vitest's `vi.mock(specifier, factory)` virtual-module
+// support, which serves the factory's return value when no physical
+// module is resolved on disk.
 //
 // No physical SDK needs to be installed to execute this suite. Do
 // NOT introduce a hand-placed stub under `node_modules/<peer>/` to

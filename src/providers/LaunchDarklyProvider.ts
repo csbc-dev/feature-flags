@@ -10,6 +10,7 @@ import type {
 } from "../types.js";
 import { raiseError } from "../raiseError.js";
 import { identityKey, stableStringify } from "./_identityKey.js";
+import { assertFiniteNonNegative, assertFinitePositive } from "./_validate.js";
 
 const DEFAULT_INIT_TIMEOUT_MS = 5_000;
 
@@ -107,6 +108,17 @@ export class LaunchDarklyProvider implements FlagProvider {
       raiseError(
         "LaunchDarklyProvider: `contextKind: \"multi\"` is reserved for multi-kind contexts. Supply a `contextBuilder` returning a LaunchDarklyMultiKindContext instead.",
       );
+    }
+    // Reject NaN / Infinity / negative values for numeric options
+    // forwarded into the LD SDK or its `waitForInitialization` timer.
+    // `initializationTimeoutMs` must additionally be strictly positive
+    // — `Math.max(1, NaN)` propagates NaN to the SDK, and `0` is
+    // ambiguous (treated as "no timeout" by some SDK versions).
+    if (options.pollInterval !== undefined) {
+      assertFiniteNonNegative("LaunchDarklyProvider", "pollInterval", options.pollInterval);
+    }
+    if (options.initializationTimeoutMs !== undefined) {
+      assertFinitePositive("LaunchDarklyProvider", "initializationTimeoutMs", options.initializationTimeoutMs);
     }
     this._options = options;
   }
@@ -262,9 +274,15 @@ export class LaunchDarklyProvider implements FlagProvider {
       try {
         if (client.waitForInitialization) {
           // `@launchdarkly/node-server-sdk` v9 accepts `{ timeout }` in
-          // seconds; older majors accept a bare number. The peer-dep
-          // range is `^9`, so we commit to the object form.
-          const timeoutSeconds = (this._options.initializationTimeoutMs ?? DEFAULT_INIT_TIMEOUT_MS) / 1000;
+          // seconds (integer); older majors accept a bare number. The
+          // peer-dep range is `^9`, so we commit to the object form.
+          // Round up so a sub-second `initializationTimeoutMs` is not
+          // truncated to `0` (which the SDK may treat as "no timeout"),
+          // and floor at 1 s for the same reason.
+          const timeoutSeconds = Math.max(
+            1,
+            Math.ceil((this._options.initializationTimeoutMs ?? DEFAULT_INIT_TIMEOUT_MS) / 1000),
+          );
           await client.waitForInitialization({ timeout: timeoutSeconds });
         }
 
@@ -320,7 +338,13 @@ export class LaunchDarklyProvider implements FlagProvider {
     const out: Record<string, FlagValue> = {};
     for (const k of Object.keys(values)) {
       if (filter && !filter(k)) continue;
-      out[k] = shape === "wrapped" ? _wrapValue(values[k]) : (values[k] as FlagValue);
+      out[k] = shape === "wrapped"
+        ? _wrapValue(values[k])
+        // Raw shape: normalise `undefined` to `null` so the published
+        // map honours the `FlagValue` contract (which excludes
+        // `undefined`). Mirrors the wrapped path's `_wrapValue`
+        // handling of an absent variation.
+        : (values[k] === undefined ? null : (values[k] as FlagValue));
     }
     return Object.freeze(out);
   }
@@ -349,11 +373,22 @@ export class LaunchDarklyProvider implements FlagProvider {
     return ctx;
   }
 
-  private _onUpdate(_args: unknown[]): void {
+  private _onUpdate(args: unknown[]): void {
     const client = this._client;
     /* v8 ignore start -- _onUpdate is only attached after _client is set and detached on dispose; the double-guard is defense-in-depth */
     if (this._disposed || !client) return;
     /* v8 ignore stop */
+    // LD emits `update` with `{ key }` per changed flag. When a
+    // `flagFilter` is configured, an update for a filtered-out flag
+    // cannot change any visible value — short-circuit before doing
+    // an O(N buckets × M flags) re-evaluation.
+    const filter = this._options.flagFilter;
+    if (filter) {
+      const payload = args[0];
+      if (payload && typeof payload === "object" && typeof (payload as { key?: unknown }).key === "string") {
+        if (!filter((payload as { key: string }).key)) return;
+      }
+    }
     for (const bucket of this._buckets.values()) {
       /* v8 ignore start -- the unsubscribe closure deletes empty buckets eagerly; an empty bucket reaching this line would require a concurrent unsub race that the synchronous `update` dispatch does not admit */
       if (bucket.subscribers.size === 0) continue;

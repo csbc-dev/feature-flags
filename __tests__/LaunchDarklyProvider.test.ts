@@ -136,6 +136,22 @@ describe("LaunchDarklyProvider", () => {
       // LD SDK surface an opaque error downstream.
       expect(() => new LaunchDarklyProvider({ sdkKey: "sdk-1", contextKind: "multi" })).toThrow(/multi/);
     });
+
+    it("rejects non-finite or negative pollInterval at construction", () => {
+      expect(() => new LaunchDarklyProvider({ sdkKey: "sdk-1", pollInterval: -1 })).toThrow(/pollInterval/);
+      expect(() => new LaunchDarklyProvider({ sdkKey: "sdk-1", pollInterval: NaN })).toThrow(/pollInterval/);
+      expect(() => new LaunchDarklyProvider({ sdkKey: "sdk-1", pollInterval: Number.POSITIVE_INFINITY })).toThrow(/pollInterval/);
+    });
+
+    it("rejects non-positive or non-finite initializationTimeoutMs at construction", () => {
+      // 0 / negative / NaN / Infinity are all invalid here. `0` is
+      // ambiguous (some SDK versions treat it as "no timeout"), and
+      // NaN cascades through `Math.max(1, NaN)` to the SDK as NaN.
+      expect(() => new LaunchDarklyProvider({ sdkKey: "sdk-1", initializationTimeoutMs: 0 })).toThrow(/initializationTimeoutMs/);
+      expect(() => new LaunchDarklyProvider({ sdkKey: "sdk-1", initializationTimeoutMs: -100 })).toThrow(/initializationTimeoutMs/);
+      expect(() => new LaunchDarklyProvider({ sdkKey: "sdk-1", initializationTimeoutMs: NaN })).toThrow(/initializationTimeoutMs/);
+      expect(() => new LaunchDarklyProvider({ sdkKey: "sdk-1", initializationTimeoutMs: Number.POSITIVE_INFINITY })).toThrow(/initializationTimeoutMs/);
+    });
   });
 
   describe("identify", () => {
@@ -186,6 +202,19 @@ describe("LaunchDarklyProvider", () => {
         max_items: 5,
         theme: { color: "blue" },
       });
+    });
+
+    it("normalises undefined raw values to null", async () => {
+      // The raw-shape branch must coerce `undefined` to `null` so the
+      // emitted map honours the FlagValue contract (which excludes
+      // `undefined`). Mirrors the wrapped path's `_wrapValue` handling.
+      mockControl.values = {
+        present: "ok",
+        absent: undefined,
+      };
+      const p = new LaunchDarklyProvider({ sdkKey: "sdk-1", valueShape: "raw" });
+      const map = await p.identify(ID_ALICE);
+      expect(map).toEqual({ present: "ok", absent: null });
     });
 
     it("respects flagFilter", async () => {
@@ -584,6 +613,55 @@ describe("LaunchDarklyProvider", () => {
       const p = new LaunchDarklyProvider({ sdkKey: "sdk-1" });
       await p.identify(ID_ALICE);
       expect(() => mockControl.instance!._emit("update", { key: "x" })).not.toThrow();
+    });
+
+    it("with flagFilter, an `update` payload without a string `key` falls through to fan-out", async () => {
+      // Defensive branch in `_onUpdate`: only short-circuit when the
+      // payload actually carries a string `key` we can pass to the
+      // filter. A bare update (no payload) or a payload whose shape
+      // we don't recognise must still trigger re-evaluation, since
+      // we cannot prove the change is filtered out.
+      mockControl.values = { public_x: false };
+      const p = new LaunchDarklyProvider({
+        sdkKey: "sdk-1",
+        flagFilter: (name) => name.startsWith("public_"),
+      });
+      const initial = await p.identify(ID_ALICE);
+      const received: unknown[] = [];
+      p.subscribe(ID_ALICE, (n) => received.push(n), initial);
+
+      // Emit an update with NO payload at all (args[0] === undefined).
+      mockControl.values = { public_x: true };
+      mockControl.instance!._emit("update");
+      await vi.waitFor(() => expect(received).toHaveLength(1), { timeout: 1000, interval: 5 });
+    });
+
+    it("an `update` for a filtered-out flag short-circuits before re-evaluation", async () => {
+      // Cycle 1 hardening: when a `flagFilter` is configured, an
+      // `update` event for a flag the filter rejects cannot change
+      // any visible value, so we must skip the O(buckets x flags)
+      // re-evaluation entirely. Verified by counting allFlagsState
+      // calls — a filtered update should leave it unchanged.
+      mockControl.values = { public_x: true, internal_x: true };
+      const p = new LaunchDarklyProvider({
+        sdkKey: "sdk-1",
+        flagFilter: (name) => name.startsWith("public_"),
+      });
+      const initial = await p.identify(ID_ALICE);
+      const received: unknown[] = [];
+      p.subscribe(ID_ALICE, (n) => received.push(n), initial);
+      const callsBefore = mockControl.instance!.allFlagsState.mock.calls.length;
+
+      // An update for the filtered-out flag must NOT trigger fan-out.
+      mockControl.instance!._emit("update", { key: "internal_x" });
+      await new Promise((r) => setTimeout(r, 20));
+      expect(received).toHaveLength(0);
+      expect(mockControl.instance!.allFlagsState.mock.calls.length).toBe(callsBefore);
+
+      // Sanity check: an update for a passing flag still drives fan-out.
+      mockControl.values = { public_x: false };
+      mockControl.instance!._emit("update", { key: "public_x" });
+      await vi.waitFor(() => expect(received).toHaveLength(1), { timeout: 1000, interval: 5 });
     });
 
     it("subscribe without prior identify fails without _getClient being called", async () => {

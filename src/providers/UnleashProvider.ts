@@ -9,6 +9,7 @@ import type {
 } from "../types.js";
 import { raiseError } from "../raiseError.js";
 import { identityKey, stableStringify } from "./_identityKey.js";
+import { assertFiniteNonNegative } from "./_validate.js";
 
 /**
  * Minimal structural shape we rely on from `unleash-client`. Declared
@@ -77,6 +78,16 @@ export class UnleashProvider implements FlagProvider {
     }
     if (!options.appName) {
       raiseError("UnleashProvider: `appName` is required.");
+    }
+    // Reject NaN / Infinity / negative values for the numeric options
+    // forwarded into `unleash-client`. The SDK feeds these into setInterval
+    // for upstream polling and metrics; a non-finite or negative value
+    // becomes a busy loop that pins a CPU core for the process lifetime.
+    if (options.refreshInterval !== undefined) {
+      assertFiniteNonNegative("UnleashProvider", "refreshInterval", options.refreshInterval);
+    }
+    if (options.metricsInterval !== undefined) {
+      assertFiniteNonNegative("UnleashProvider", "metricsInterval", options.metricsInterval);
     }
     this._options = options;
   }

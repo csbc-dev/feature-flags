@@ -413,6 +413,18 @@ describe("FlagsCore", () => {
       expect(identify).not.toHaveBeenCalled();
     });
 
+    it("ensureIdentified is a no-op after dispose", async () => {
+      // Cycle 1 hardening: post-dispose ensureIdentified must short-
+      // circuit before touching the provider — auth0-gate may fire a
+      // late `ready` event after the host already detached the Core.
+      const identify = vi.fn(async () => ({}));
+      const p = makeStubProvider({ identify });
+      const core = new FlagsCore({ provider: p, userContext: USER });
+      await core.dispose();
+      await core.ensureIdentified();
+      expect(identify).not.toHaveBeenCalled();
+    });
+
     it("omits undefined attrs from the identity", async () => {
       const identify = vi.fn(async () => ({}));
       const p = makeStubProvider({ identify });
@@ -718,6 +730,37 @@ describe("FlagsCore", () => {
       const core = new FlagsCore({ provider: p });
       await expect(core.dispose()).resolves.toBeUndefined();
     });
+
+    it("awaits in-flight provider calls before tearing the provider down", async () => {
+      // Regression guard: dispose() must `Promise.allSettled` the
+      // outstanding provider promises so a late-resolving identify()
+      // does not land on an already-disposed Provider. We hold the
+      // identify() promise deliberately pending, kick dispose(), and
+      // verify that dispose only completes AFTER identify resolves.
+      let releaseIdentify!: (value: FlagMap) => void;
+      const identifyGate = new Promise<FlagMap>((resolve) => { releaseIdentify = resolve; });
+      const events: string[] = [];
+      const p = makeStubProvider({
+        async identify() {
+          const value = await identifyGate;
+          events.push("identify-resolved");
+          return value;
+        },
+        async dispose() { events.push("dispose-called"); },
+      });
+      const core = new FlagsCore({ provider: p });
+      const identifyPromise = core.identify("alice");
+      // Yield once so the awaited identify enters _inFlight.
+      await Promise.resolve();
+      const disposePromise = core.dispose();
+      // Release the in-flight provider call AFTER dispose has begun.
+      releaseIdentify({ x: true });
+      await disposePromise;
+      await identifyPromise.catch(() => {});
+      // identify must resolve before provider.dispose() runs — the
+      // `Promise.allSettled([..._inFlight])` line gates it.
+      expect(events).toEqual(["identify-resolved", "dispose-called"]);
+    });
   });
 
   describe("deep-freeze contract", () => {
@@ -807,6 +850,68 @@ describe("FlagsCore", () => {
       await core.identify("bob");
       // Exactly one null per identify call is acceptable (the initial clear).
       expect(nullHits.length).toBeLessThanOrEqual(2);
+    });
+  });
+
+  describe("provider synchronous throw", () => {
+    it("clears `loading` when provider.identify throws synchronously", async () => {
+      // Regression: a provider that throws sync from identify() must
+      // not leave the Core wedged with `loading=true`.
+      const p: FlagProvider = {
+        identify: (() => { throw new Error("sync identify boom"); }) as FlagProvider["identify"],
+        subscribe: () => () => {},
+        async reload() { return {}; },
+      };
+      const core = new FlagsCore({ provider: p });
+      await core.identify("alice");
+      expect(core.loading).toBe(false);
+      expect(core.identified).toBe(false);
+      expect(core.error?.message).toMatch(/sync identify boom/);
+    });
+
+    it("clears `loading` when provider.reload throws synchronously", async () => {
+      // Regression: same contract on the reload() cache-bypass path.
+      let throwOnReload = false;
+      const p: FlagProvider = {
+        async identify() { return {}; },
+        subscribe: () => () => {},
+        reload: (() => {
+          if (throwOnReload) throw new Error("sync reload boom");
+          return Promise.resolve({});
+        }) as FlagProvider["reload"],
+      };
+      const core = new FlagsCore({ provider: p });
+      await core.identify("alice");
+      throwOnReload = true;
+      await core.reload();
+      expect(core.loading).toBe(false);
+      expect(core.error?.message).toMatch(/sync reload boom/);
+    });
+  });
+
+  describe("updateUserContext + manual identify interaction", () => {
+    it("re-identifies when _currentIdentity drifted from the refreshed userContext", async () => {
+      // Regression: a manual identify("bob") overrides the
+      // userContext-derived identity. A subsequent token-refresh for
+      // the original user (alice) MUST re-identify so the Core does
+      // not stay wedged on bob's flag map while the live session is
+      // back to alice — comparing only against `_userContext`
+      // would treat alice→alice as a no-op and miss the drift.
+      const identify = vi.fn(async (id: FlagIdentity) => ({ u: id.userId }));
+      const p = makeStubProvider({ identify });
+      const core = new FlagsCore({ provider: p, userContext: USER });
+      await core.ensureIdentified();
+      expect(identify).toHaveBeenCalledTimes(1);
+
+      // Manual override → bob.
+      await core.identify("auth0|bob");
+      expect(identify).toHaveBeenCalledTimes(2);
+      expect(core.flags).toEqual({ u: "auth0|bob" });
+
+      // Auth0 token refresh re-sends alice (same as constructor user).
+      await core.updateUserContext(USER);
+      expect(identify).toHaveBeenCalledTimes(3);
+      expect(core.flags).toEqual({ u: USER.sub });
     });
   });
 });

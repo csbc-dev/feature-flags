@@ -1,3 +1,4 @@
+import { raiseError } from "./raiseError.js";
 import type { IConfig, IWritableConfig } from "./types.js";
 
 interface IInternalConfig {
@@ -54,7 +55,20 @@ export function getConfig(): IConfig {
 
 export function setConfig(partialConfig: IWritableConfig): void {
   if (partialConfig.tagNames) {
-    Object.assign(_config.tagNames, partialConfig.tagNames);
+    // Boundary defence: `IWritableTagNames` permits `undefined` so a TS
+    // user can spread a partial overrides object, but blindly assigning
+    // those undefined / empty entries onto `_config.tagNames` would push
+    // a non-string into `customElements.define()` at registration time,
+    // throwing a SyntaxError that kills bootstrap. Validate at the
+    // user-input boundary instead of every consumption site.
+    for (const key of Object.keys(partialConfig.tagNames) as Array<keyof typeof partialConfig.tagNames>) {
+      const v = partialConfig.tagNames[key];
+      if (v === undefined) continue;
+      if (typeof v !== "string" || v.length === 0) {
+        raiseError(`setConfig: tagNames.${String(key)} must be a non-empty string.`);
+      }
+      _config.tagNames[key] = v;
+    }
   }
   frozenConfig = null;
 }

@@ -8,6 +8,7 @@ import type {
 } from "../types.js";
 import { raiseError } from "../raiseError.js";
 import { identityKey as _identityKey, stableStringify as _stableStringify } from "./_identityKey.js";
+import { assertFiniteNonNegative } from "./_validate.js";
 
 const DEFAULT_POLLING_INTERVAL_MS = 30_000;
 const DEFAULT_ENVIRONMENT_REFRESH_SECONDS = 60;
@@ -124,6 +125,22 @@ export class FlagsmithProvider implements FlagProvider {
   constructor(options: FlagsmithProviderOptions) {
     if (!options || !options.environmentKey) {
       raiseError("FlagsmithProvider: `environmentKey` is required.");
+    }
+    // Reject NaN / Infinity / negative values for the numeric options.
+    // setInterval / SDK refresh loops treat negative or non-finite
+    // intervals as 0 ms or implementation-defined garbage — the
+    // resulting busy-loop can pin a CPU core for the lifetime of the
+    // process. Validate at the user-input boundary rather than relying
+    // on downstream defenses.
+    if (options.pollingIntervalMs !== undefined) {
+      assertFiniteNonNegative("FlagsmithProvider", "pollingIntervalMs", options.pollingIntervalMs);
+    }
+    if (options.environmentRefreshIntervalSeconds !== undefined) {
+      assertFiniteNonNegative(
+        "FlagsmithProvider",
+        "environmentRefreshIntervalSeconds",
+        options.environmentRefreshIntervalSeconds,
+      );
     }
     this._options = options;
     if (options.realtime && !_realtimeWarningLogged) {
@@ -315,8 +332,9 @@ export class FlagsmithProvider implements FlagProvider {
     // meaningfully consumes scalars, so passing arbitrary structures
     // would at best be silently dropped by the SDK's JSON encoder and
     // at worst leak values the caller never intended to ship upstream.
-    // Keep only primitives (string / number / boolean / null); arrays
-    // are CSV-joined to match the Unleash context mapping; nested
+    // Keep only primitives (string / number / boolean / bigint / null);
+    // bigints are stringified to match UnleashProvider; arrays are
+    // CSV-joined to match the Unleash context mapping; nested
     // objects are dropped rather than stringified — a stringified
     // object entering a rule predicate as a single opaque string is
     // a footgun, and the consumer should opt in explicitly if they
@@ -330,6 +348,11 @@ export class FlagsmithProvider implements FlagProvider {
     /* v8 ignore start -- dispose() clears timers before the flag flips, so a disposed poll never actually starts in practice */
     if (this._disposed) return;
     /* v8 ignore stop */
+    // The setInterval callback may still fire one tick after the bucket
+    // was torn down by the final unsubscribe (clearInterval races with
+    // an already-scheduled callback). Bail before issuing a fetch the
+    // bucket no longer cares about.
+    if (bucket.subscribers.size === 0 || this._pollers.get(_identityKey(bucket.identity)) !== bucket) return;
     let client: FlagsmithClientLike;
     try {
       client = await this._getClient();
@@ -370,12 +393,21 @@ export class FlagsmithProvider implements FlagProvider {
 
 /**
  * Coerce a free-form `identity.attrs` bag into the scalar trait shape
- * Flagsmith consumes. Arrays are CSV-joined (stringifying any nested
- * objects); nested plain objects, functions, Symbols, and `undefined`
- * values are dropped outright. Returns `undefined` when the sanitized
- * bag is empty, so the underlying SDK call receives no traits argument
- * rather than an empty object — matches the pre-sanitization behaviour
- * for callers that never supplied attrs at all.
+ * Flagsmith consumes. Accepts string / number / boolean / bigint / null;
+ * bigints are stringified to mirror UnleashProvider's `_buildContext`.
+ * Arrays are CSV-joined (stringifying any nested objects); nested plain
+ * objects, functions, Symbols, and `undefined` values are dropped
+ * outright. Returns `undefined` when the sanitized bag is empty, so the
+ * underlying SDK call receives no traits argument rather than an empty
+ * object — matches the pre-sanitization behaviour for callers that never
+ * supplied attrs at all.
+ *
+ * `null` is forwarded as-is. Note: some Flagsmith SDK versions interpret
+ * a `null` trait value as a request to delete the trait on the server
+ * for that identity. Callers who want a trait to be absent (rather than
+ * deleted) should omit the key entirely or use `undefined`, which is
+ * dropped here. This deliberately diverges from `FlagsCore._buildIdentity`,
+ * which only ships keys that are actually present.
  */
 function _sanitizeTraits(
   attrs: Record<string, unknown> | undefined,
@@ -388,6 +420,13 @@ function _sanitizeTraits(
       out[k] = null;
     } else if (typeof v === "string" || typeof v === "number" || typeof v === "boolean") {
       out[k] = v;
+    } else if (typeof v === "bigint") {
+      // Stringify bigint to match UnleashProvider's `_buildContext`,
+      // which routes the same `FlagIdentity.attrs` through `String(v)`.
+      // Without this branch, a bigint trait silently disappears here
+      // but reaches Unleash, causing a same-identity targeting drift
+      // between the two providers.
+      out[k] = String(v);
     } else if (Array.isArray(v)) {
       // CSV join, stringifying nested objects element-wise so the
       // shape matches UnleashProvider's context mapping.

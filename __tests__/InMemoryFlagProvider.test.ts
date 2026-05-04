@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { InMemoryFlagProvider } from "../src/providers/InMemoryFlagProvider";
 import type { FlagIdentity, FlagMap } from "../src/types";
 
@@ -188,5 +188,67 @@ describe("InMemoryFlagProvider", () => {
     // Subscribers cleared — a later setFlag must not call onChange.
     p.setFlag("b", true);
     expect(count).toBe(0);
+  });
+
+  it("subscribe() on a disposed provider throws", () => {
+    // Cycle 2 hardening: late subscribers after dispose() must not
+    // silently install handlers that will never fire — they should
+    // raise so callers learn about the lifecycle bug eagerly.
+    const p = new InMemoryFlagProvider({ flags: [{ key: "a", defaultValue: true }] });
+    p.dispose();
+    expect(() => p.subscribe(ID_ALICE, () => {})).toThrow(/disposed/);
+  });
+
+  it("identify() / reload() on a disposed provider throw", async () => {
+    // Read-side counterpart to the subscribe-on-disposed guard:
+    // post-dispose evaluation must surface as an explicit error,
+    // not as a silently-evaluated empty map.
+    const p = new InMemoryFlagProvider({ flags: [{ key: "a", defaultValue: true }] });
+    p.dispose();
+    await expect(p.identify(ID_ALICE)).rejects.toThrow(/disposed/);
+    await expect(p.reload(ID_ALICE)).rejects.toThrow(/disposed/);
+  });
+
+  it("setFlags() / setFlag() / dispose() are no-ops after dispose", () => {
+    // Write-side post-dispose contract: we already cleared subscribers
+    // and flags, so a stray setFlags call must not revive the
+    // provider; a second dispose() must short-circuit silently.
+    const p = new InMemoryFlagProvider({ flags: [{ key: "a", defaultValue: true }] });
+    let count = 0;
+    p.subscribe(ID_ALICE, () => { count++; });
+    p.dispose();
+    p.dispose(); // second dispose: hits the `_disposed` early return
+    p.setFlags([{ key: "x", defaultValue: 1 }]);
+    p.setFlag("y", true);
+    expect(count).toBe(0);
+  });
+
+  it("a throwing rule predicate is skipped without breaking sibling rules or subscribers", () => {
+    // A caller-supplied predicate that throws must not corrupt the
+    // surrounding evaluation: the offending rule is dropped, a warn
+    // surfaces it, and evaluation falls through to the default value.
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const p = new InMemoryFlagProvider({
+        flags: [{
+          key: "beta",
+          defaultValue: false,
+          rules: [
+            { key: "beta", value: true, predicate: () => { throw new Error("rule blew up"); } },
+            // Fallthrough rule — matches everyone, returns "fallback".
+            { key: "beta", value: "fallback" as unknown as boolean, predicate: () => true },
+          ],
+        }],
+      });
+      const received: FlagMap[] = [];
+      p.subscribe(ID_ALICE, (m) => received.push(m));
+      p.setFlag("beta", false); // triggers _notifyAll -> _evaluate
+      expect(received[0]).toEqual({ beta: "fallback" });
+      expect(warn).toHaveBeenCalled();
+      // Confirm the warn message shape: identifies the offending flag.
+      expect(String(warn.mock.calls[0][0])).toContain("beta");
+    } finally {
+      warn.mockRestore();
+    }
   });
 });

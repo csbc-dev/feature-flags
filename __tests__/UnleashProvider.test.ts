@@ -573,6 +573,57 @@ describe("UnleashProvider", () => {
       await p.identify(ID_ALICE);
       expect(mockControl.constructor.mock.calls[0][0].customHeaders).toBeUndefined();
     });
+
+    it("clientKey wins over a customHeaders.Authorization and warns about the silent precedence", async () => {
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const p = new UnleashProvider({
+        url: "http://u", appName: "app",
+        clientKey: "secret-token",
+        customHeaders: { Authorization: "stale-token", Trace: "abc" },
+      });
+      await p.identify(ID_ALICE);
+      expect(mockControl.constructor.mock.calls[0][0].customHeaders).toEqual({
+        Trace: "abc",
+        Authorization: "secret-token",
+      });
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringContaining("`clientKey` takes precedence"),
+      );
+      warn.mockRestore();
+    });
+
+    it("warns when clientKey is combined with customHeadersFunction", async () => {
+      // `customHeadersFunction` is consulted by some unleash-client
+      // versions instead of merging `customHeaders`, so the
+      // clientKey-derived `Authorization` may silently not apply. The
+      // types.ts docstring warns about it; the runtime must too.
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const fn = async (): Promise<Record<string, string>> => ({ Authorization: "from-fn" });
+      const p = new UnleashProvider({
+        url: "http://u", appName: "app",
+        clientKey: "secret-token",
+        customHeadersFunction: fn,
+      });
+      await p.identify(ID_ALICE);
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringContaining("`customHeadersFunction`"),
+      );
+      warn.mockRestore();
+    });
+
+    it("does NOT warn about customHeadersFunction when clientKey is absent", async () => {
+      // No `clientKey` → no Authorization-precedence ambiguity, so a
+      // bare `customHeadersFunction` must not trigger the warning.
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const fn = async (): Promise<Record<string, string>> => ({ Authorization: "from-fn" });
+      const p = new UnleashProvider({
+        url: "http://u", appName: "app",
+        customHeadersFunction: fn,
+      });
+      await p.identify(ID_ALICE);
+      expect(warn).not.toHaveBeenCalled();
+      warn.mockRestore();
+    });
   });
 
   describe("subscribe (event-driven fan-out)", () => {
@@ -628,6 +679,26 @@ describe("UnleashProvider", () => {
       mockControl.instance!._emit("changed");
       expect(a).toHaveLength(1);
       expect(b).toHaveLength(1);
+    });
+
+    it("a throwing onChange is isolated — sibling subscribers still receive the update", async () => {
+      // Fan-out hardening: a synchronous throw from one subscriber's
+      // onChange must not abort delivery to the rest.
+      const p = new UnleashProvider({ url: "http://u", appName: "app" });
+      const initial = await p.identify(ID_ALICE);
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const good: unknown[] = [];
+      p.subscribe(ID_ALICE, () => { throw new Error("subscriber boom"); }, initial);
+      p.subscribe(ID_ALICE, (n) => good.push(n), initial);
+      mockControl.instance!.getFeatureToggleDefinitions.mockReturnValue([{ name: "x" }]);
+      mockControl.instance!.isEnabled.mockReturnValue(true);
+      expect(() => mockControl.instance!._emit("changed")).not.toThrow();
+      expect(good).toHaveLength(1);
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringContaining("onChange threw during fan-out"),
+        expect.any(Error),
+      );
+      warn.mockRestore();
     });
 
     it("distinct identities do not share a bucket", async () => {

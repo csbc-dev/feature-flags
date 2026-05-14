@@ -8,6 +8,7 @@ import type {
   UnleashProviderOptions,
 } from "../types.js";
 import { raiseError } from "../raiseError.js";
+import { deepCloneAndFreeze } from "../freeze.js";
 import { identityKey, stableStringify } from "./_identityKey.js";
 import { assertFiniteNonNegative } from "./_validate.js";
 
@@ -223,11 +224,32 @@ export class UnleashProvider implements FlagProvider {
         raiseError("UnleashProvider: `unleash-client` module did not expose `initialize` or `Unleash`.");
       }
 
-      // When `clientKey` is supplied, prepend it to any user-supplied
-      // custom headers as the `Authorization` entry — that is the shape
-      // unleash-client expects for SDK tokens.
+      // When `clientKey` is supplied, set it as the `Authorization`
+      // entry — that is the shape unleash-client expects for SDK
+      // tokens. If `customHeaders` already carries an `Authorization`
+      // header, `clientKey` wins (it is the more specific, purpose-
+      // built option) but we warn so the silent precedence is visible
+      // — a caller passing both almost certainly has a config mistake.
       const headers: Record<string, string> = { ...(this._options.customHeaders ?? {}) };
       if (this._options.clientKey !== undefined) {
+        if ("Authorization" in headers) {
+          console.warn(
+            "[@csbc-dev/feature-flags] UnleashProvider: both `clientKey` and a `customHeaders.Authorization` were supplied — `clientKey` takes precedence and the custom `Authorization` header is ignored.",
+          );
+        }
+        // `customHeadersFunction` is consulted by some `unleash-client`
+        // versions on every request INSTEAD of merging `customHeaders`,
+        // which means the `Authorization` header derived from
+        // `clientKey` may silently never be applied. The types.ts
+        // docstring on `customHeadersFunction` warns about this; warn
+        // here too so the precedence ambiguity is visible at runtime —
+        // the caller must include `Authorization` inside the function's
+        // returned map themselves.
+        if (this._options.customHeadersFunction !== undefined) {
+          console.warn(
+            "[@csbc-dev/feature-flags] UnleashProvider: both `clientKey` and `customHeadersFunction` were supplied — some `unleash-client` versions consult `customHeadersFunction` on every request instead of merging `customHeaders`, so the `Authorization` header derived from `clientKey` may not be applied. Include `Authorization` in the headers your `customHeadersFunction` returns.",
+          );
+        }
         headers.Authorization = this._options.clientKey;
       }
       const client = init({
@@ -346,7 +368,11 @@ export class UnleashProvider implements FlagProvider {
       }
       out[def.name] = { enabled, value };
     }
-    return Object.freeze(out);
+    // Deep-clone-and-freeze every level. `value` may be a parsed-JSON
+    // structure from `_extractVariantValue`; a shallow `Object.freeze`
+    // would leave those nested objects mutable to consumers. Matches
+    // FlagsmithProvider / LaunchDarklyProvider / InMemoryFlagProvider.
+    return deepCloneAndFreeze(out);
   }
 
   private _buildContext(identity: FlagIdentity): UnleashContext {
@@ -401,7 +427,16 @@ export class UnleashProvider implements FlagProvider {
       // Snapshot before iteration — a subscriber's onChange may
       // synchronously unsubscribe.
       for (const entry of Array.from(bucket.subscribers)) {
-        entry.onChange(next);
+        // Isolate each subscriber: a synchronous throw from one
+        // onChange must not abort the fan-out to the rest.
+        try {
+          entry.onChange(next);
+        } catch (err) {
+          console.warn(
+            "[@csbc-dev/feature-flags] UnleashProvider: a subscriber's onChange threw during fan-out and was isolated.",
+            err,
+          );
+        }
       }
     }
   }
@@ -430,7 +465,6 @@ export class UnleashProvider implements FlagProvider {
  *   pathological variant with neither payload nor name (not emitted
  *   by the real SDK).
  */
-/* v8 ignore start -- `v.name` / `v.payload.value` are always strings per Unleash's public schema; the trailing nulls exist for SDK versions that stray from the contract */
 function _extractVariantValue(v: UnleashVariantLike): FlagValue {
   const payload = v.payload;
   if (payload && typeof payload.value === "string") {
@@ -445,9 +479,13 @@ function _extractVariantValue(v: UnleashVariantLike): FlagValue {
     }
     return payload.value;
   }
+  // `v.name` is a required string per Unleash's public schema; the
+  // `?? null` branch only fires for an SDK version that strays from
+  // the contract (a variant with neither payload nor name) and is
+  // not reachable from the real SDK.
+  /* v8 ignore next */
   return v.name ?? null;
 }
-/* v8 ignore stop */
 
 /**
  * Best-effort `client.off(event, listener)` used during cleanup paths.

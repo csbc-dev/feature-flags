@@ -23,6 +23,15 @@ const _config: IInternalConfig = {
  * could re-enter the same object), either redesign the shape or
  * switch both helpers to a WeakSet-guarded walk — otherwise a cycle
  * causes unbounded recursion and a stack overflow at first use.
+ *
+ * Arrays are ALSO unsupported. `deepClone` walks `Object.keys` and
+ * reconstructs into a plain `{}`, so an array value would be cloned
+ * into an object with stringified numeric keys (losing its
+ * `Array` prototype, `length`, and iteration behaviour). `deepFreeze`
+ * would freeze an array correctly, but the clone runs first. The
+ * current config has no array-valued fields; if one is added, special-
+ * case `Array.isArray` in `deepClone` (and ideally generalize both
+ * helpers) before relying on it.
  */
 function deepFreeze<T>(obj: T): T {
   if (obj === null || typeof obj !== "object") return obj;

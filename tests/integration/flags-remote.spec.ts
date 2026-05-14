@@ -1,3 +1,4 @@
+import type { Page } from "@playwright/test";
 import { test, expect } from "@playwright/test";
 import { startServer } from "./server.js";
 
@@ -11,11 +12,36 @@ test.afterAll(async () => {
   await server.close();
 });
 
-test("initial sync: unidentified defaults delivered", async ({ page }) => {
+/**
+ * Drive `client.html` to completion and return its parsed `#results`.
+ *
+ * Every test in this file exercises the SAME client script and asserts
+ * on a different key of the `results` JSON it emits. The shared concern
+ * is that the script must reach `#status === "done"`; if it instead
+ * throws, the `catch` in client.html flips `#status` to `"error"` and
+ * writes the message under `results.error`. Without an explicit guard,
+ * a script-side failure would surface only as an opaque 10 s
+ * `toHaveText("done")` timeout — this helper waits on EITHER terminal
+ * status and fails fast with the real error message when it is
+ * `"error"`, so a regression in the remote pipeline is diagnosable
+ * instead of looking like a flaky timeout.
+ */
+async function runClient(page: Page): Promise<Record<string, unknown>> {
   await page.goto(`http://localhost:${server.port}/client.html`);
-  await expect(page.locator("#status")).toHaveText("done", { timeout: 10000 });
+  // Wait for a terminal status (done | error) rather than only "done",
+  // so an error path resolves immediately instead of timing out.
+  await expect(page.locator("#status")).toHaveText(/^(done|error)$/, { timeout: 10000 });
+  const status = await page.locator("#status").textContent();
+  const results = JSON.parse((await page.locator("#results").textContent())!) as Record<string, unknown>;
+  if (status === "error") {
+    throw new Error(`client.html aborted with an error: ${String(results.error)}`);
+  }
+  expect(results.error).toBeUndefined();
+  return results;
+}
 
-  const results = JSON.parse((await page.locator("#results").textContent())!);
+test("initial sync: unidentified defaults delivered", async ({ page }) => {
+  const results = await runClient(page);
 
   // sync delivered initial values
   expect(results.syncReceived).toBe(true);
@@ -27,10 +53,7 @@ test("initial sync: unidentified defaults delivered", async ({ page }) => {
 });
 
 test("identify('alice'): rule-targeted flag resolves to true", async ({ page }) => {
-  await page.goto(`http://localhost:${server.port}/client.html`);
-  await expect(page.locator("#status")).toHaveText("done", { timeout: 10000 });
-
-  const results = JSON.parse((await page.locator("#results").textContent())!);
+  const results = await runClient(page);
 
   // alice matches the feature-x rule; feature-y falls back to default;
   // feature-z carries its default (nothing has been mutated yet).
@@ -44,10 +67,7 @@ test("identify('alice'): rule-targeted flag resolves to true", async ({ page }) 
 });
 
 test("re-identify as 'bob' swaps rule targeting", async ({ page }) => {
-  await page.goto(`http://localhost:${server.port}/client.html`);
-  await expect(page.locator("#status")).toHaveText("done", { timeout: 10000 });
-
-  const results = JSON.parse((await page.locator("#results").textContent())!);
+  const results = await runClient(page);
 
   // bob loses the feature-x rule (defaults to false) and gains feature-y.
   expect(results.bobFlags).toEqual({
@@ -58,10 +78,7 @@ test("re-identify as 'bob' swaps rule targeting", async ({ page }) => {
 });
 
 test("subscription push: server setFlag propagates to client", async ({ page }) => {
-  await page.goto(`http://localhost:${server.port}/client.html`);
-  await expect(page.locator("#status")).toHaveText("done", { timeout: 10000 });
-
-  const results = JSON.parse((await page.locator("#results").textContent())!);
+  const results = await runClient(page);
 
   // After server-side setFlag("feature-z", 100), the subscriber path
   // delivers the new value to the client without an explicit reload.
@@ -72,10 +89,7 @@ test("subscription push: server setFlag propagates to client", async ({ page }) 
 });
 
 test("reload(): fetches a fresh snapshot past the push pipeline", async ({ page }) => {
-  await page.goto(`http://localhost:${server.port}/client.html`);
-  await expect(page.locator("#status")).toHaveText("done", { timeout: 10000 });
-
-  const results = JSON.parse((await page.locator("#results").textContent())!);
+  const results = await runClient(page);
 
   // After setFlag("feature-z", 999) + reload(), client observes 999.
   expect(results.reloadedFeatureZ).toBe(999);
@@ -84,11 +98,8 @@ test("reload(): fetches a fresh snapshot past the push pipeline", async ({ page 
 });
 
 test("bind() updates include loading and flags transitions", async ({ page }) => {
-  await page.goto(`http://localhost:${server.port}/client.html`);
-  await expect(page.locator("#status")).toHaveText("done", { timeout: 10000 });
-
-  const results = JSON.parse((await page.locator("#results").textContent())!);
-  const updates: { name: string; value: unknown }[] = results.updates;
+  const results = await runClient(page);
+  const updates = results.updates as { name: string; value: unknown }[];
 
   // loading should transition true ↔ false across identify/reload cycles
   const loadingValues = updates.filter((u) => u.name === "loading").map((u) => u.value);

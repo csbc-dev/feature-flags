@@ -30,6 +30,7 @@
     "prepack": "npm run build",
     "build": "tsc",
     "dev": "tsc --watch",
+    "typecheck": "tsc --noEmit -p tsconfig.test.json",
     "test": "npm run test:unit",
     "test:watch": "npm run test:unit:watch",
     "test:coverage": "npm run test:unit:coverage",

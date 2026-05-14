@@ -7,6 +7,7 @@ import type {
   FlagValue,
 } from "../types.js";
 import { raiseError } from "../raiseError.js";
+import { deepCloneAndFreeze } from "../freeze.js";
 import { identityKey as _identityKey, stableStringify as _stableStringify } from "./_identityKey.js";
 import { assertFiniteNonNegative } from "./_validate.js";
 
@@ -386,7 +387,16 @@ export class FlagsmithProvider implements FlagProvider {
     // synchronously, and we want every subscriber at poll time to see
     // this tick.
     for (const entry of Array.from(bucket.subscribers)) {
-      entry.onChange(next);
+      // Isolate each subscriber: a synchronous throw from one
+      // onChange must not abort the fan-out to the rest.
+      try {
+        entry.onChange(next);
+      } catch (err) {
+        console.warn(
+          "[@csbc-dev/feature-flags] FlagsmithProvider: a subscriber's onChange threw during fan-out and was isolated.",
+          err,
+        );
+      }
     }
   }
 }
@@ -442,10 +452,24 @@ function _sanitizeTraits(
 }
 
 function _flattenFlagsmithResult(result: FlagsmithIdentityFlagsLike): FlagMap {
-  const list: FlagsmithFlagLike[] =
-    (typeof result.getAllFlags === "function" && result.getAllFlags()) ||
-    (typeof result.allFlags === "function" && result.allFlags()) ||
-    [];
+  // Probe both the v5 (`getAllFlags`) and the older (`allFlags`) shape.
+  // If NEITHER is present, the SDK returned something this Provider
+  // does not understand — throw rather than fall back to an empty
+  // list. A silent `{}` fallback is indistinguishable from a real
+  // "this identity has zero flags" result, so it would mask an SDK
+  // upgrade / wiring bug as a legitimate (but wrong) empty flag map
+  // published all the way to the client. Throwing routes the failure
+  // onto FlagsCore's `error` channel where it is observable.
+  let list: FlagsmithFlagLike[];
+  if (typeof result.getAllFlags === "function") {
+    list = result.getAllFlags();
+  } else if (typeof result.allFlags === "function") {
+    list = result.allFlags();
+  } else {
+    raiseError(
+      "FlagsmithProvider: the `flagsmith-nodejs` identity-flags result exposed neither `getAllFlags()` nor `allFlags()` — the installed SDK version is not supported.",
+    );
+  }
   const out: Record<string, FlagValue> = {};
   for (const f of list) {
     const name = f.featureName ?? f.feature?.name;
@@ -459,6 +483,11 @@ function _flattenFlagsmithResult(result: FlagsmithIdentityFlagsLike): FlagMap {
       value: (f.value ?? null) as FlagValue,
     };
   }
-  return Object.freeze(out);
+  // Deep-clone-and-freeze every level. `f.value` is the SDK's own
+  // remote-config object — a shallow `Object.freeze(out)` would leave
+  // those nested values mutable AND share references back into the
+  // SDK's flag objects. Cloning isolates both sides. Matches
+  // UnleashProvider / LaunchDarklyProvider / InMemoryFlagProvider.
+  return deepCloneAndFreeze(out);
 }
 

@@ -251,6 +251,32 @@ describe("LaunchDarklyProvider", () => {
       expect(map).toEqual({});
     });
 
+    it("throws when allFlagsState() reports valid=false", async () => {
+      // `valid: false` means the SDK could not produce a real
+      // evaluation (uninitialized client, store unavailable, rejected
+      // context). `allValues()` is empty/stale in that state, so
+      // publishing it would hand the client a misleading empty map.
+      // It must reject onto FlagsCore's `error` channel instead.
+      mockControl.instance!.allFlagsState = vi.fn(async () => ({
+        valid: false,
+        allValues: () => ({}),
+      })) as unknown as typeof mockControl.instance.allFlagsState;
+      const p = new LaunchDarklyProvider({ sdkKey: "sdk-1" });
+      await expect(p.identify(ID_ALICE)).rejects.toThrow(/valid=false/);
+    });
+
+    it("does not throw when valid is absent (older SDKs / mocks)", async () => {
+      // `valid` is optional in the SDK shape. Only an explicit `false`
+      // trips the guard — an absent `valid` is assumed valid so older
+      // SDKs and minimal mocks keep working.
+      mockControl.instance!.allFlagsState = vi.fn(async () => ({
+        allValues: () => ({ "feature-x": true }),
+      })) as unknown as typeof mockControl.instance.allFlagsState;
+      const p = new LaunchDarklyProvider({ sdkKey: "sdk-1" });
+      const map = await p.identify(ID_ALICE);
+      expect(map).toEqual({ "feature-x": { enabled: true, value: true } });
+    });
+
     it("rejects when waitForInitialization rejects", async () => {
       mockControl.initBehavior = "reject";
       mockControl.initRejectReason = new Error("upstream dead");
@@ -535,6 +561,27 @@ describe("LaunchDarklyProvider", () => {
         expect(a).toHaveLength(1);
         expect(b).toHaveLength(1);
       }, { timeout: 1000, interval: 5 });
+    });
+
+    it("a throwing onChange is isolated — sibling subscribers still receive the update", async () => {
+      // Fan-out hardening: a synchronous throw from one subscriber's
+      // onChange must not abort delivery to the rest.
+      mockControl.values = { x: false };
+      const p = new LaunchDarklyProvider({ sdkKey: "sdk-1" });
+      const initial = await p.identify(ID_ALICE);
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const good: unknown[] = [];
+      p.subscribe(ID_ALICE, () => { throw new Error("subscriber boom"); }, initial);
+      p.subscribe(ID_ALICE, (n) => good.push(n), initial);
+
+      mockControl.values = { x: true };
+      mockControl.instance!._emit("update", { key: "x" });
+      await vi.waitFor(() => expect(good).toHaveLength(1), { timeout: 1000, interval: 5 });
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringContaining("onChange threw during fan-out"),
+        expect.any(Error),
+      );
+      warn.mockRestore();
     });
 
     it("distinct identities do not share a bucket", async () => {

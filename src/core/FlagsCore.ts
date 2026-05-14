@@ -1,5 +1,6 @@
 import { raiseError } from "../raiseError.js";
 import { deepCloneAndFreeze } from "../freeze.js";
+import { EMPTY_FLAGS, FLAGS_WC_BINDABLE } from "../wcBindable.js";
 import type {
   FlagIdentity,
   FlagMap,
@@ -9,8 +10,6 @@ import type {
   IWcBindable,
   UserContextLike,
 } from "../types.js";
-
-const EMPTY_FLAGS: FlagMap = Object.freeze({});
 
 /**
  * Server-side feature flag Core.
@@ -36,20 +35,10 @@ const EMPTY_FLAGS: FlagMap = Object.freeze({});
  *    publish the same way.
  */
 export class FlagsCore extends EventTarget {
-  static wcBindable: IWcBindable = {
-    protocol: "wc-bindable",
-    version: 1,
-    properties: [
-      { name: "flags",      event: "feature-flags:flags-changed" },
-      { name: "identified", event: "feature-flags:identified-changed" },
-      { name: "loading",    event: "feature-flags:loading-changed" },
-      { name: "error",      event: "feature-flags:error" },
-    ],
-    commands: [
-      { name: "identify", async: true },
-      { name: "reload",   async: true },
-    ],
-  };
+  // Shared with `<feature-flags>` (the Shell) — see `wcBindable.ts`.
+  // The Core and Shell are two ends of one protocol; defining the
+  // descriptor in one place prevents silent drift.
+  static wcBindable: IWcBindable = FLAGS_WC_BINDABLE;
 
   private _target: EventTarget;
   private _provider: FlagProvider;
@@ -166,6 +155,23 @@ export class FlagsCore extends EventTarget {
 
       // Normal case: identify was committed, run a cache-bypass
       // fetch for the same identity.
+      //
+      // NOTE on ordering: reload() deliberately does NOT bump
+      // `_generation`. It runs *for the current identity*, not a new
+      // one — bumping the generation would silently invalidate the
+      // live `subscribe()` callback installed by `_doIdentify` (which
+      // captured the pre-reload generation), permanently muting push
+      // updates for an identity that was never replaced. So a
+      // provider-push that interleaves with an in-flight reload()
+      // shares this generation and is NOT dropped. The two can race
+      // on `_publishFlags` order, but this is intentionally tolerated:
+      // both `reload()` and the subscribe push evaluate against the
+      // SAME provider-side cache, so whichever lands last differs from
+      // the other by at most one upstream tick, and the next push (or
+      // an explicit reload) reconverges. The generation guard's job is
+      // to fence *superseded identities*, not to serialize two
+      // refreshes of the same one — that ordering is left to the
+      // provider's own cache coherence.
       const myGen = this._generation;
       this._setError(null);
       this._setLoading(true);
@@ -221,9 +227,17 @@ export class FlagsCore extends EventTarget {
   }
 
   /**
-   * Propagate a refreshed `UserContext` (typically fired by auth0-gate's
-   * `onTokenRefresh`). Re-identifies if `sub` or any targeting-relevant
-   * trait has changed, otherwise no-ops.
+   * Propagate a refreshed `UserContext`. Re-identifies if `sub` or any
+   * targeting-relevant trait has changed, otherwise no-ops.
+   *
+   * NOT part of the `wcBindable` surface: this is a server-side host
+   * API, not a client-invokable command. The canonical caller is
+   * `@csbc-dev/auth0`'s `onTokenRefresh` hook — see the README
+   * composition examples (`onTokenRefresh: (core, user) =>
+   * (core as FlagsCore).updateUserContext(user)`). The auth gate owns
+   * the token lifecycle and pushes refreshed claims here; exposing it
+   * over `wcBindable` would let the (untrusted) browser drive identity,
+   * which is exactly the leak Case B2 is designed to prevent.
    */
   async updateUserContext(user: UserContextLike): Promise<void> {
     if (this._disposed) return;
@@ -255,6 +269,20 @@ export class FlagsCore extends EventTarget {
     ) {
       return;
     }
+
+    // Clear any armed auto-identify promise before running the
+    // re-identify — mirrors `identify()`. If an `_autoIdentify` is
+    // still in-flight when a token refresh lands here, leaving
+    // `_autoIdentifyPromise` set would let a concurrent
+    // `ensureIdentified()` early-return on that stale promise (which
+    // resolves against the PRE-refresh userContext) while this call is
+    // already committing `_doIdentify` for the refreshed identity.
+    // Clearing it forces any later `ensureIdentified()` to observe the
+    // `_identified` flag this call's `_doIdentify` sets and no-op
+    // correctly. The in-flight `_autoIdentify` itself is still fenced
+    // by the generation guard bumped inside `_doIdentify`, so its
+    // result cannot overwrite the refreshed identity's state.
+    this._autoIdentifyPromise = null;
 
     const identity = _buildIdentity(user);
     await this._doIdentify(identity);
@@ -344,7 +372,6 @@ export class FlagsCore extends EventTarget {
       this._inFlight.add(identifyPromise);
       initial = await identifyPromise;
     } catch (err) {
-      if (identifyPromise) this._inFlight.delete(identifyPromise);
       if (this._generation !== myGen) return;
       // The identify cycle for `identity` did NOT commit a flag map.
       // We already tore down the previous identity's subscription and
@@ -366,10 +393,16 @@ export class FlagsCore extends EventTarget {
       this._setError(err instanceof Error ? err : new Error(String(err)));
       this._setLoading(false);
       return;
+    } finally {
+      // Drop the in-flight handle on both the success and failure
+      // paths from one place — mirrors `reload()`'s `finally`-based
+      // cleanup. `identifyPromise` is non-null whenever the provider
+      // call was actually issued (the only way to reach `try`-body
+      // completion or the `catch`); a synchronous throw from
+      // `_provider.identify` before assignment leaves it null and the
+      // guard skips the no-op `delete(null)`.
+      if (identifyPromise) this._inFlight.delete(identifyPromise);
     }
-    // identifyPromise is non-null here: assignment happened before
-    // the awaited call that resolved successfully.
-    this._inFlight.delete(identifyPromise!);
 
     if (this._generation !== myGen) return;
 

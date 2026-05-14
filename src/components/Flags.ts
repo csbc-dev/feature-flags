@@ -1,11 +1,10 @@
 import { bind } from "@wc-bindable/core";
 import type { UnbindFn } from "@wc-bindable/core";
 import type { RemoteCoreProxy } from "@wc-bindable/remote";
-import { deepCloneAndFreeze } from "../freeze.js";
+import { deepFreeze } from "../freeze.js";
 import { raiseError } from "../raiseError.js";
+import { EMPTY_FLAGS, FLAGS_WC_BINDABLE } from "../wcBindable.js";
 import type { FlagMap, IWcBindable } from "../types.js";
-
-const EMPTY_FLAGS: FlagMap = Object.freeze({});
 
 /**
  * Element structurally matching `<auth0-session>`'s public surface.
@@ -40,20 +39,10 @@ interface SessionLike extends HTMLElement {
  * the flag map is schema-less on the wire (see README §Schema-less design).
  */
 export class Flags extends HTMLElement {
-  static wcBindable: IWcBindable = {
-    protocol: "wc-bindable",
-    version: 1,
-    properties: [
-      { name: "flags",      event: "feature-flags:flags-changed" },
-      { name: "identified", event: "feature-flags:identified-changed" },
-      { name: "loading",    event: "feature-flags:loading-changed" },
-      { name: "error",      event: "feature-flags:error" },
-    ],
-    commands: [
-      { name: "identify", async: true },
-      { name: "reload",   async: true },
-    ],
-  };
+  // Shared with `FlagsCore` (the Core) — see `wcBindable.ts`. The
+  // Shell re-dispatches exactly the surface the Core publishes;
+  // defining the descriptor in one place prevents silent drift.
+  static wcBindable: IWcBindable = FLAGS_WC_BINDABLE;
 
   static get observedAttributes(): string[] {
     return ["target"];
@@ -157,6 +146,15 @@ export class Flags extends HTMLElement {
   // --- Lifecycle ------------------------------------------------------------
 
   connectedCallback(): void {
+    // `<feature-flags>` is a headless observation node — it has no
+    // visual representation by design. The inline style is the most
+    // robust default (it works without the consumer shipping a
+    // stylesheet rule), but it is an *inline* style: a consumer
+    // stylesheet rule like `feature-flags { display: contents }` will
+    // lose the specificity battle. Consumers who must override should
+    // use `!important` or set `el.style.display = ""` themselves. This
+    // is intentional — hidden-by-default is the safe choice for a
+    // non-rendering element.
     this.style.display = "none";
     // Defer one microtask so sibling elements (notably the target
     // session) can finish upgrading before we resolve them by ID.
@@ -258,6 +256,19 @@ export class Flags extends HTMLElement {
     // fire twice on this element.
     if (this._unbindProxy) return;
 
+    // NOTE on re-bind cost: `bind()` synchronously replays the proxy's
+    // current property values into the callback below (that is how a
+    // late binder gets the initial snapshot). Each replayed `flags`
+    // value goes through `_asFlagMap` → `deepFreeze`, so an
+    // unstable transport whose session `ready` flickers true↔false
+    // pays one whole-map deep freeze walk + a `feature-flags:flags-changed`
+    // dispatch per re-bind. This is intentional and correct — a re-bind
+    // genuinely re-establishes the surface and consumers must see the
+    // (re-)initial value — but it is not free; the churn is bounded by
+    // how often the upstream session toggles `ready`, not by this
+    // element. `identified` / `loading` re-dispatches are deduped by
+    // their setters, so only `flags` (intentionally never deduped, see
+    // `_setFlags`) and `error` actually re-fire on a no-op re-bind.
     this._unbindProxy = bind(proxy, (name, value) => {
       switch (name) {
         case "flags":
@@ -428,7 +439,9 @@ export class Flags extends HTMLElement {
       /* v8 ignore stop */
       this._stopWaitingForTarget();
       this._setError(new Error(
-        `[@csbc-dev/feature-flags] <feature-flags>: target "${this.target}" did not resolve within 30s; giving up.`,
+        `[@csbc-dev/feature-flags] <feature-flags>: target "${this.target}" did not resolve within 30s; giving up. ` +
+        `To retry, set the \`target\` attribute to a different value and back, or re-insert the element into the DOM — ` +
+        `re-assigning the SAME \`target\` value is a no-op (see attributeChangedCallback).`,
       ));
     }, 30_000);
     const tt = timeout as unknown as { unref?: () => void };
@@ -509,10 +522,15 @@ function _asFlagMap(value: unknown): FlagMap {
   if (value && typeof value === "object") {
     // Deep-freeze so consumers cannot mutate nested flag values (e.g.
     // Flagsmith's `{ enabled, value }` objects) via `values.flags.x.enabled = true`.
-    // Remote-mode delivers deserialized fresh objects, so cloning does
-    // not contend with any upstream owner — the Core and the wire each
-    // own their own copies.
-    return deepCloneAndFreeze(value as FlagMap);
+    //
+    // Freeze-in-place, NOT clone: `<feature-flags>` is remote-only by
+    // design, so the value reaching this `bind()` callback was just
+    // deserialized off the wire by `RemoteCoreProxy` — a fresh object
+    // graph this Shell solely owns. The Core already did a
+    // `deepCloneAndFreeze` on the server before serialization; cloning
+    // a second time here would be redundant work on the update hot
+    // path with no upstream owner left to isolate from.
+    return deepFreeze(value as FlagMap);
   }
   return EMPTY_FLAGS;
 }
@@ -535,12 +553,27 @@ function _asErrorOrNull(value: unknown): Error | null {
       return _restoreErrorMeta(new Error(msg), value);
     }
     // Fall back to `String(value)` so callers that supply a custom
-    // toString() still surface a useful message. If the result is the
-    // useless `[object Object]`, JSON-stringify the payload so plain
-    // objects are not silently flattened to that sentinel.
+    // toString() still surface a useful message. Two results are
+    // rejected as useless and routed to the JSON-stringify fallback
+    // instead:
+    //   - `"[object Object]"` — the default Object.prototype.toString
+    //     sentinel; a plain `{ code, detail }` POJO must not flatten
+    //     to it.
+    //   - `""` — an empty string. `String([])` is `""`, and an array
+    //     payload (or any object whose toString() returns empty) would
+    //     otherwise become a useless `new Error("")` with no message
+    //     on the error channel. JSON-stringifying keeps the payload's
+    //     contents observable to consumers binding to `error`.
     const s = String(value);
-    if (s !== "[object Object]") return new Error(s);
-    try { return new Error(JSON.stringify(value)); } catch { return new Error(s); }
+    if (s !== "[object Object]" && s !== "") return new Error(s);
+    try {
+      return new Error(JSON.stringify(value));
+    } catch {
+      // `JSON.stringify` threw (cycle / BigInt). Surface `s` if it
+      // carries anything, otherwise a stable sentinel — never an
+      // empty-message Error.
+      return new Error(s !== "" ? s : "[unserializable error payload]");
+    }
   }
   return new Error(String(value));
 }

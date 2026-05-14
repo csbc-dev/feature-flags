@@ -61,6 +61,31 @@ export type FlagMap = Readonly<Record<string, FlagValue>>;
  * `@csbc-dev/auth0`, `identify()` is called automatically
  * with `userContext.sub` as `userId` and a Flagsmith-style trait
  * flattening of `email` / `name` / `permissions` / `roles` / `orgId`.
+ *
+ * ## Array-valued attrs are NOT handled uniformly across providers
+ *
+ * `attrs` values are typed `unknown`, but the built-in providers
+ * normalize array values (e.g. `permissions` / `roles`) differently
+ * because each vendor's targeting engine accepts a different trait
+ * shape:
+ *
+ * - **{@link FlagsmithProvider}** / **{@link UnleashProvider}** —
+ *   array values are CSV-joined into a single string (`["a","b"]` →
+ *   `"a,b"`; nested non-string elements are `JSON.stringify`-ed
+ *   element-wise). Flagsmith traits and Unleash `context.properties`
+ *   are both string-scalar maps, so an array cannot survive as an
+ *   array. Targeting rules must therefore match against the joined
+ *   string (substring / regex predicates), not list membership.
+ * - **{@link LaunchDarklyProvider}** — array values pass through
+ *   unchanged. LD contexts accept any JSON-serializable attribute, so
+ *   targeting rules can use LD's native "contains" / set operators.
+ *
+ * The upshot: the SAME `FlagIdentity` reaches different providers in
+ * different shapes. If you author targeting rules against array
+ * traits, they are not portable between Flagsmith/Unleash and
+ * LaunchDarkly without rewriting the predicate. Supply a provider
+ * `contextBuilder` (LD / Unleash) to override the default mapping
+ * when you need a specific shape.
  */
 export interface FlagIdentity {
   userId: string;
@@ -82,7 +107,16 @@ export type FlagUnsubscribe = () => void;
  * - `identify()` returns the initial flag snapshot for a given identity.
  *   Synchronous failure → throw; async failure → reject.
  * - `subscribe()` registers a handler invoked whenever the provider
- *   observes a flag change (polling diff, SSE push, etc.). Handler is
+ *   observes a flag change (polling diff, SSE push, etc.). It MUST
+ *   return its {@link FlagUnsubscribe} synchronously — the return type
+ *   is `FlagUnsubscribe`, not `Promise<FlagUnsubscribe>`. `FlagsCore`
+ *   relies on this: it calls `subscribe()` straight-line after
+ *   publishing the initial snapshot and stores the returned handle on
+ *   `_unsubscribeProvider` without awaiting, so a provider that needs
+ *   async setup must complete (or kick off) that work internally and
+ *   hand back a handle that tears the eventual subscription down. A
+ *   synchronous `throw` is the only supported failure mode; an async
+ *   rejection has nowhere to be observed. Handler is
  *   NOT called with the initial snapshot — that path goes through
  *   `identify()`. The optional `initial` argument lets the caller seed
  *   the Provider's change-detection baseline with the value already
@@ -91,7 +125,16 @@ export type FlagUnsubscribe = () => void;
  *   not actually changed. Each `subscribe()` call returns a distinct
  *   `FlagUnsubscribe`: N calls → N independent unsubscribes, even when
  *   the same `onChange` reference is reused.
- * - `reload()` forces a refresh bypassing any provider-side cache.
+ * - `reload()` re-fetches the flag snapshot for an identity. Where the
+ *   underlying SDK exposes a cache-bypassing fetch, `reload()` uses it;
+ *   where it does not (Unleash and LaunchDarkly run their own internal
+ *   streaming/polling loop and expose no force-fetch API), `reload()`
+ *   re-evaluates against the SDK's current in-process cache instead.
+ *   In that case upstream freshness is bounded by the SDK's own
+ *   refresh interval — lower `refreshInterval` / `pollInterval` rather
+ *   than spamming `reload()`. The InMemory and Flagsmith providers do
+ *   perform a real re-fetch. See each provider's `reload()` for the
+ *   exact behaviour.
  * - `dispose()` releases any provider-owned resources (polling timer,
  *   open SSE connection, SDK client). Called from {@link FlagsCore.dispose}.
  */

@@ -162,11 +162,39 @@ export function startServer(port: number): Promise<{
       // `/packages/core/dist/index.js` becomes
       // `node_modules/@wc-bindable/core/dist/index.js`.
       if (url.startsWith("/packages/")) {
-        const file = path.join(wcBindableRoot, url.slice("/packages/".length));
-        if (fs.existsSync(file)) {
-          const ext = path.extname(file);
+        // Strip the query / hash before joining — a `?` or `#` in the
+        // URL would otherwise become part of the filesystem path.
+        const rawPath = url.slice("/packages/".length).split(/[?#]/)[0];
+        // Decode percent-escapes so an encoded `%2e%2e` traversal
+        // attempt is normalized into real `..` segments BEFORE the
+        // containment check below — otherwise the check sees the
+        // still-encoded form and `path.resolve` decodes nothing,
+        // letting the escaped traversal slip through `fs.existsSync`.
+        let decodedPath: string;
+        try {
+          decodedPath = decodeURIComponent(rawPath);
+        } catch {
+          // Malformed percent-encoding — reject outright.
+          res.writeHead(400);
+          res.end("Bad request");
+          return;
+        }
+        const resolved = path.resolve(wcBindableRoot, decodedPath);
+        // Containment check: the resolved path must stay inside
+        // `wcBindableRoot`. Without this, `/packages/../../../etc/passwd`
+        // (or its percent-encoded form) would read files anywhere on
+        // disk. Compare against `wcBindableRoot + sep` so a sibling
+        // directory sharing the prefix (`@wc-bindable-evil/`) cannot
+        // satisfy a naive `startsWith(wcBindableRoot)`.
+        if (resolved !== wcBindableRoot && !resolved.startsWith(wcBindableRoot + path.sep)) {
+          res.writeHead(403);
+          res.end("Forbidden");
+          return;
+        }
+        if (fs.existsSync(resolved) && fs.statSync(resolved).isFile()) {
+          const ext = path.extname(resolved);
           res.writeHead(200, { "Content-Type": MIME[ext] ?? "application/octet-stream" });
-          fs.createReadStream(file).pipe(res);
+          fs.createReadStream(resolved).pipe(res);
           return;
         }
       }

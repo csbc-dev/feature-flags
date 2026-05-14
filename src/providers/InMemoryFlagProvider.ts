@@ -165,9 +165,9 @@ export class InMemoryFlagProvider implements FlagProvider {
       }
       out[def.key] = value;
     }
-    // Deep-clone-and-freeze every level to match Flagsmith/Unleash
-    // providers: evaluated values here share references with the
-    // rule definitions stored in `this._flags`, so a shallow freeze
+    // Deep-clone-and-freeze every level to match Flagsmith / Unleash /
+    // LaunchDarkly providers: evaluated values here share references
+    // with the rule definitions stored in `this._flags`, so a shallow freeze
     // would leak source-of-truth refs to consumers (e.g. arrays or
     // `{ enabled, value }` objects could be mutated through the
     // evaluated map and bleed into the next evaluation). FlagsCore
@@ -184,10 +184,32 @@ export class InMemoryFlagProvider implements FlagProvider {
     // unsubscribe closure in `subscribe`), which would otherwise
     // mutate the live Map under the outer for-of cursor.
     for (const bucket of Array.from(this._subscribers.values())) {
-      for (const { identity, onChange } of Array.from(bucket)) {
-        // Each subscriber is re-evaluated independently because rules
-        // can produce different values per identity.
-        onChange(this._evaluate(identity));
+      const entries = Array.from(bucket);
+      // `bucket` is keyed by the canonical identity key, so every
+      // entry in it shares the same `userId` + serialized `attrs`.
+      // Rule predicates are a pure function of the `FlagIdentity`
+      // content, so they evaluate identically for every entry —
+      // evaluate ONCE per bucket and fan the single result out, the
+      // same shape FlagsmithProvider (`_pollBucket`) and
+      // UnleashProvider (`_onChanged`) already use. The prior
+      // per-subscriber `_evaluate` ran the rule set (and a
+      // `deepCloneAndFreeze`) N times for an N-subscriber bucket with
+      // an identical result each time.
+      /* v8 ignore start -- a bucket only exists while it has >=1 subscriber (the unsubscribe closure deletes empty buckets eagerly), so an empty `entries` reaching this line is not reproducible */
+      if (entries.length === 0) continue;
+      /* v8 ignore stop */
+      const next = this._evaluate(entries[0].identity);
+      for (const { onChange } of entries) {
+        // Isolate each subscriber: a synchronous throw from one
+        // onChange must not abort the fan-out to the rest.
+        try {
+          onChange(next);
+        } catch (err) {
+          console.warn(
+            "[@csbc-dev/feature-flags] InMemoryFlagProvider: a subscriber's onChange threw during fan-out and was isolated.",
+            err,
+          );
+        }
       }
     }
   }

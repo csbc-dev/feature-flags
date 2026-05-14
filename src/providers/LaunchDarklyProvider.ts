@@ -9,6 +9,7 @@ import type {
   LaunchDarklySingleKindContext,
 } from "../types.js";
 import { raiseError } from "../raiseError.js";
+import { deepCloneAndFreeze } from "../freeze.js";
 import { identityKey, stableStringify } from "./_identityKey.js";
 import { assertFiniteNonNegative, assertFinitePositive } from "./_validate.js";
 
@@ -29,9 +30,15 @@ interface LDClientLike {
 }
 
 interface LDFlagsStateLike {
+  /**
+   * `false` when the SDK could not produce a meaningful evaluation —
+   * client never finished initialization, the LD store is unavailable,
+   * or the context was rejected. `allValues()` in that state is an
+   * empty (or stale) map, so `_evaluate` treats `valid === false` as a
+   * hard failure rather than publishing a misleading empty flag map.
+   */
   valid?: boolean;
   allValues?(): Record<string, unknown>;
-  toJSON?(): unknown;
 }
 
 interface SubscriberEntry {
@@ -332,6 +339,20 @@ export class LaunchDarklyProvider implements FlagProvider {
       context,
       this._options.clientSideOnly ? { clientSideOnly: true } : undefined,
     );
+    // `valid === false` means the SDK could not produce a real
+    // evaluation (uninitialized client, unavailable store, rejected
+    // context). `allValues()` is empty / stale in that state, so
+    // publishing it would silently hand the client an empty flag map
+    // that is indistinguishable from a legitimate "no flags" result.
+    // Throw instead so the failure lands on FlagsCore's `error`
+    // channel. Only `=== false` trips this — `valid` is optional in
+    // the SDK shape and an absent value is treated as "assume valid"
+    // (older SDKs / mocks that do not set it).
+    if (state.valid === false) {
+      raiseError(
+        "LaunchDarklyProvider: `allFlagsState()` returned an invalid state (valid=false) — the SDK client is uninitialized or the context was rejected.",
+      );
+    }
     const values = typeof state.allValues === "function" ? state.allValues() : {};
     const filter = this._options.flagFilter;
     const shape = this._options.valueShape ?? "wrapped";
@@ -346,7 +367,12 @@ export class LaunchDarklyProvider implements FlagProvider {
         // handling of an absent variation.
         : (values[k] === undefined ? null : (values[k] as FlagValue));
     }
-    return Object.freeze(out);
+    // Deep-clone-and-freeze every level. LD's `allValues()` can hand
+    // back JSON-variation objects whose references are owned by the
+    // SDK's in-process cache; a shallow `Object.freeze` would leave
+    // those nested values mutable AND share refs back into the SDK.
+    // Matches FlagsmithProvider / UnleashProvider / InMemoryFlagProvider.
+    return deepCloneAndFreeze(out);
   }
 
   private _buildContext(identity: FlagIdentity): LaunchDarklyContext {
@@ -365,8 +391,20 @@ export class LaunchDarklyProvider implements FlagProvider {
       // a valid trait value in LD).
       if (v === undefined) continue;
       // Never allow caller attrs to overwrite the structural keys
-      // (`kind`, `key`). Consumers who need a non-default kind should
-      // pass `contextKind` or supply a `contextBuilder`.
+      // (`kind`, `key`) — those define the context's identity and a
+      // non-default `kind` must come from `contextKind` / a
+      // `contextBuilder`, not a stray trait.
+      //
+      // `_meta` and `anonymous` are deliberately NOT stripped: they
+      // are first-class LD context fields, and `attrs._meta` is the
+      // *documented* way for a consumer on the default-builder path to
+      // declare `privateAttributes` (analytics redaction) without
+      // having to write a full `contextBuilder`. See `types.ts`
+      // (`LaunchDarklyContextCommon`) and the LaunchDarklyProvider
+      // test suite ("forwards `_meta` from identity.attrs"). The
+      // default builder never sets `_meta` / `anonymous` itself, so
+      // there is nothing here for a caller attr to "overwrite" — it is
+      // pure passthrough by design.
       if (k === "kind" || k === "key") continue;
       ctx[k] = v;
     }
@@ -428,7 +466,16 @@ export class LaunchDarklyProvider implements FlagProvider {
         // Snapshot before iteration — a subscriber's onChange may
         // synchronously unsubscribe.
         for (const entry of Array.from(bucket.subscribers)) {
-          entry.onChange(next);
+          // Isolate each subscriber: a synchronous throw from one
+          // onChange must not abort the fan-out to the rest.
+          try {
+            entry.onChange(next);
+          } catch (err) {
+            console.warn(
+              "[@csbc-dev/feature-flags] LaunchDarklyProvider: a subscriber's onChange threw during fan-out and was isolated.",
+              err,
+            );
+          }
         }
       } while (bucket.pending);
     })().finally(() => {

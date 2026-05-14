@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { identityKey, stableStringify, stableValue } from "../src/providers/_identityKey";
+import { identityKey, stableStringify, __stableValue } from "../src/providers/_identityKey";
 
 describe("_identityKey helpers", () => {
   describe("stableStringify", () => {
@@ -14,16 +14,16 @@ describe("_identityKey helpers", () => {
     });
   });
 
-  describe("stableValue", () => {
+  describe("__stableValue", () => {
     it("serializes primitives via JSON.stringify", () => {
-      expect(stableValue(null)).toBe("null");
-      expect(stableValue(1)).toBe("1");
-      expect(stableValue("x")).toBe('"x"');
-      expect(stableValue(true)).toBe("true");
+      expect(__stableValue(null)).toBe("null");
+      expect(__stableValue(1)).toBe("1");
+      expect(__stableValue("x")).toBe('"x"');
+      expect(__stableValue(true)).toBe("true");
     });
 
     it("preserves array element order", () => {
-      expect(stableValue(["b", "a", "c"])).toBe('["b","a","c"]');
+      expect(__stableValue(["b", "a", "c"])).toBe('["b","a","c"]');
     });
   });
 
@@ -86,8 +86,8 @@ describe("_identityKey helpers", () => {
     it("tolerates cycles through arrays", () => {
       const arr: unknown[] = [];
       arr.push(arr);
-      expect(() => stableValue(arr)).not.toThrow();
-      expect(stableValue(arr)).toBe('["[Circular]"]');
+      expect(() => __stableValue(arr)).not.toThrow();
+      expect(__stableValue(arr)).toBe('["[Circular]"]');
     });
 
     it("shared non-ancestor references are NOT flagged as circular", () => {

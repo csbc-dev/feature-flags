@@ -146,11 +146,31 @@ describe("FlagsmithProvider", () => {
       expect(Object.keys(map)).toHaveLength(2);
     });
 
-    it("handles an empty result shape", async () => {
+    it("throws when the SDK result exposes neither getAllFlags() nor allFlags()", async () => {
+      // A result object carrying NEITHER accessor means the installed
+      // `flagsmith-nodejs` is a shape this Provider does not understand.
+      // It must surface as an error (onto FlagsCore's `error` channel)
+      // rather than silently flattening to `{}` — a silent empty map is
+      // indistinguishable from a real "this identity has zero flags".
       mockControl.shape = "empty";
       setDefaultFlags();
       const p = new FlagsmithProvider({ environmentKey: "env_key" });
-      expect(await p.identify(ID_ALICE)).toEqual({});
+      await expect(p.identify(ID_ALICE)).rejects.toThrow(
+        /exposed neither `getAllFlags\(\)` nor `allFlags\(\)`/,
+      );
+    });
+
+    it("handles a genuine zero-flag result (getAllFlags returns [])", async () => {
+      // The accessor IS present and simply returns an empty list — a
+      // legitimate "no flags for this identity" outcome. This must NOT
+      // throw; it flattens to an empty (frozen) map.
+      mockControl.getIdentityFlags.mockImplementation(() => ({
+        getAllFlags: () => [],
+      }));
+      const p = new FlagsmithProvider({ environmentKey: "env_key" });
+      const map = await p.identify(ID_ALICE);
+      expect(map).toEqual({});
+      expect(Object.isFrozen(map)).toBe(true);
     });
 
     it("skips entries without a feature name", async () => {
@@ -354,6 +374,25 @@ describe("FlagsmithProvider", () => {
       await vi.advanceTimersByTimeAsync(5000);
       await Promise.resolve();
       expect(received).toHaveLength(1);
+    });
+
+    it("a throwing onChange is isolated — sibling subscribers still receive the poll update", async () => {
+      // Fan-out hardening: a synchronous throw from one subscriber's
+      // onChange must not abort delivery to the rest.
+      const p = new FlagsmithProvider({ environmentKey: "env_key", pollingIntervalMs: 1000 });
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const good: unknown[] = [];
+      p.subscribe(ID_ALICE, () => { throw new Error("subscriber boom"); });
+      p.subscribe(ID_ALICE, (next) => good.push(next));
+      // First poll: empty sentinel → different → fan-out fires.
+      await vi.advanceTimersByTimeAsync(1000);
+      await Promise.resolve();
+      expect(good).toHaveLength(1);
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringContaining("onChange threw during fan-out"),
+        expect.any(Error),
+      );
+      warn.mockRestore();
     });
 
     it("a poll for a stale captured bucket bails before fetching", async () => {

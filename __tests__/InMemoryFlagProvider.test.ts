@@ -73,6 +73,24 @@ describe("InMemoryFlagProvider", () => {
     expect(b).toHaveLength(1);
   });
 
+  it("a throwing onChange is isolated — sibling subscribers still get the update", () => {
+    // Fan-out hardening: a synchronous throw from one subscriber's
+    // onChange must not abort delivery to the rest.
+    const p = new InMemoryFlagProvider({ flags: [{ key: "a", defaultValue: false }] });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const good: FlagMap[] = [];
+    p.subscribe(ID_ALICE, () => { throw new Error("subscriber boom"); });
+    p.subscribe(ID_ALICE, (m) => good.push(m));
+    expect(() => p.setFlag("a", true)).not.toThrow();
+    expect(good).toHaveLength(1);
+    expect(good[0]).toEqual({ a: true });
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining("onChange threw during fan-out"),
+      expect.any(Error),
+    );
+    warn.mockRestore();
+  });
+
   it("unsubscribing one of several subscribers leaves the bucket intact", () => {
     const p = new InMemoryFlagProvider({ flags: [{ key: "a", defaultValue: false }] });
     const a: FlagMap[] = [];

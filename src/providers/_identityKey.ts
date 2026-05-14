@@ -44,8 +44,11 @@ export function stableStringify(obj: Record<string, unknown>): string {
  * polling-bucket flag maps) and is the only shape used by the providers.
  * Exposed solely so unit tests can exercise primitive / array / cycle
  * paths without indirecting through an enclosing object.
+ *
+ * The `__` prefix marks it as a test-only export — same convention as
+ * `__resetRealtimeWarning` in `FlagsmithProvider.ts`.
  */
-export function stableValue(v: unknown): string {
+export function __stableValue(v: unknown): string {
   return _stableValueImpl(v, new WeakSet());
 }
 

@@ -508,6 +508,35 @@ describe("<feature-flags>", () => {
     expect(el.error?.message).toBe("[object Object]");
   });
 
+  it("JSON-stringifies an empty-array error payload instead of producing an empty-message Error", async () => {
+    // Regression guard: `String([])` is `""`, which is neither
+    // `"[object Object]"` nor a useful message — the pre-fix code
+    // produced `new Error("")`. An array payload whose `String()`
+    // collapses to empty must route to the JSON-stringify fallback so
+    // a non-empty, observable message reaches the error channel.
+    const sess = makeSession();
+    const el = makeFlagsEl();
+    sess.ready = true;
+    await flush();
+    sess.proxy!._publish("error", []);
+    expect(el.error?.message).toBe("[]");
+  });
+
+  it("falls back to a stable sentinel when an empty-String() payload also fails JSON.stringify", async () => {
+    // A cyclic array: `String(value)` is `""` (Array.prototype.toString
+    // renders the cycle as empty), so the empty-string branch is taken,
+    // but `JSON.stringify` throws on the cycle. The catch must never
+    // surface an empty-message Error — it falls back to a sentinel.
+    const sess = makeSession();
+    const el = makeFlagsEl();
+    sess.ready = true;
+    await flush();
+    const cyclicArr: unknown[] = [];
+    cyclicArr.push(cyclicArr);
+    sess.proxy!._publish("error", cyclicArr);
+    expect(el.error?.message).toBe("[unserializable error payload]");
+  });
+
   it("wraps primitive non-string error payloads via String()", async () => {
     // Numbers / booleans / bigints / symbols hit the final fallback
     // (neither null/undefined, nor Error, nor string, nor object).

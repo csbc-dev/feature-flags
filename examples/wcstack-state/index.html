@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>feature-flags · @wcstack-state</title>
+    <link rel="stylesheet" href="/src/styles.css" />
+  </head>
+  <body>
+    <main>
+      <h1>@csbc-dev/feature-flags — @wcstack-state</h1>
+      <p class="hint">
+        The <em>declarative</em> path. <code>&lt;feature-flags&gt;</code> publishes its
+        bindable surface into the <code>@wcstack-state</code> store via
+        <code>data-wcs</code>, and the rest of the page reads from that store —
+        no per-flag JavaScript.
+      </p>
+
+      <!--
+        Transport (stands in for <auth0-session>) + the Shell.
+
+        `data-wcs="flags: currentFlags; ..."` PUBLISHES each bindable property
+        of <feature-flags> into the wcstack state store under the named key.
+        Everything below then CONSUMES those keys.
+
+        NOTE on initial state: <feature-flags> holds `flags = {}` (frozen) and
+        bind() replays that EMPTY map immediately — before the first server
+        snapshot arrives. So deep dotted paths like `currentFlags.cta_text.value`
+        and `currentFlags.new_checkout_flow.enabled` resolve to UNDEFINED for the
+        first frame(s). The vanilla example (which also uses <feature-flags>)
+        special-cases the empty map with a "Waiting…" placeholder; the
+        declarative bindings below instead tolerate undefined gracefully (text
+        renders blank, `if:` is falsy), so no per-flag guard is wired here. If
+        your runtime errors on undefined deep paths, gate the section on
+        `currentFlags` being populated first. (The React/Vue examples don't use
+        this element at all — their initial `{}` is a framework state seed; see
+        examples/README.md "Initial flag state".)
+      -->
+      <demo-session id="flags-session" url="ws://localhost:8787"></demo-session>
+      <feature-flags
+        id="flags"
+        target="flags-session"
+        data-wcs="flags: currentFlags; identified: flagsReady; loading: flagsLoading; error: flagsError">
+      </feature-flags>
+
+      <div class="status">
+        <span>identified: <b data-wcs="text: flagsReady">…</b></span>
+        <span>loading: <b data-wcs="text: flagsLoading">…</b></span>
+        <span>cta_text: <b data-wcs="text: currentFlags.cta_text.value">…</b></span>
+      </div>
+
+      <div class="controls">
+        <!--
+          Command invocation (identify / reload) is wired imperatively in
+          main.ts. How a declarative runtime expresses "call this command" is
+          library-specific, so we keep it out of the data-wcs markup here.
+        -->
+        <button data-identify="alice">identify("alice")</button>
+        <button data-identify="bob">identify("bob")</button>
+        <button data-identify="guest">identify("guest")</button>
+        <button id="btn-reload">reload()</button>
+      </div>
+
+      <!--
+        Conditional rendering driven by a single flag, via `data-wcs="if: …"`.
+        The <template> contents render only while the expression is truthy.
+      -->
+      <template data-wcs="if: currentFlags.new_checkout_flow.enabled">
+        <p class="callout">🎉 New checkout flow is enabled for this identity.</p>
+      </template>
+
+      <template data-wcs="if: currentFlags.dark_mode.enabled">
+        <p class="callout">🌙 Dark mode is enabled for this identity.</p>
+      </template>
+
+      <!-- beta_banner is flipped by the server every few seconds — a live push. -->
+      <template data-wcs="if: currentFlags.beta_banner.enabled">
+        <div class="banner">✨ Beta banner is live (toggled server-side).</div>
+      </template>
+    </main>
+
+    <!-- 1) Register <feature-flags> and <demo-session>, wire command buttons. -->
+    <script type="module" src="/src/main.ts"></script>
+
+    <!--
+      2) Load the @wcstack-state declarative runtime from a CDN and start it.
+
+      IMPORTANT: @wcstack-state is not bundled with this example — it is fetched
+      at runtime from esm.sh. Confirm the published package name, version, and
+      init export against the real @wcstack-state docs and adjust the two lines
+      below if they differ. The `data-wcs` MARKUP above follows the documented
+      syntax (`key: statePath`, `text: …`, `if: …`); only the bootstrap call is
+      runtime-specific.
+
+      Two caveats with the import line below:
+        - The URL is UNPINNED, so esm.sh serves whatever `latest` is — for
+          anything beyond a throwaway demo pin a version, e.g.
+          `https://esm.sh/@wcstack-state@1.2.3`.
+        - The `mount` export name is a PLACEHOLDER / best guess; replace it with
+          the runtime's actual init export (and the call signature) from its docs.
+
+      This module runs AFTER main.ts (module scripts execute in document order),
+      so both custom elements are already defined when the runtime scans the DOM.
+    -->
+    <script type="module">
+      // import { mount } from "https://esm.sh/@wcstack-state@1.2.3";  // ← pin in real use
+      import { mount } from "https://esm.sh/@wcstack-state";
+      // Scan the document for `data-wcs` bindings and start reacting to the
+      // bindable elements. (If the real runtime auto-starts on import, this
+      // call is a harmless no-op / can be removed.)
+      mount(document.body);
+    </script>
+  </body>
+</html>

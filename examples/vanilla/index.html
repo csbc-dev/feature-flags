@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>feature-flags · Vanilla</title>
+    <link rel="stylesheet" href="/src/styles.css" />
+  </head>
+  <body>
+    <main>
+      <h1>@csbc-dev/feature-flags — Vanilla</h1>
+      <p class="hint">
+        This example uses the real <code>&lt;feature-flags&gt;</code> Shell element.
+        A tiny <code>&lt;demo-session&gt;</code> element provides the transport (it
+        stands in for <code>&lt;auth0-session&gt;</code>); <code>&lt;feature-flags&gt;</code>
+        subscribes to it and re-dispatches the flag surface, which we observe with
+        <code>bind()</code>.
+      </p>
+
+      <!--
+        Transport + Shell. `<feature-flags target="flags-session">` resolves the
+        session by id and subscribes to its RemoteCoreProxy. Both are headless
+        (display:none) — they render nothing themselves.
+      -->
+      <demo-session id="flags-session" url="ws://localhost:8787"></demo-session>
+      <feature-flags id="flags" target="flags-session"></feature-flags>
+
+      <div class="status">
+        <span>identified: <b id="s-identified">false</b></span>
+        <span>loading: <b id="s-loading">false</b></span>
+        <span id="s-error-wrap">error: <b id="s-error">none</b></span>
+      </div>
+
+      <div class="controls">
+        <button data-identify="alice">identify("alice")</button>
+        <button data-identify="bob">identify("bob")</button>
+        <button data-identify="guest">identify("guest")</button>
+        <button id="btn-reload">reload()</button>
+      </div>
+
+      <table>
+        <thead>
+          <tr><th>flag</th><th>state</th><th>raw value</th></tr>
+        </thead>
+        <tbody id="flags-body">
+          <tr><td colspan="3" class="hint">Waiting for the first flag snapshot…</td></tr>
+        </tbody>
+      </table>
+
+      <p id="callout" class="callout" hidden>🎉 New checkout flow is enabled for this identity.</p>
+    </main>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

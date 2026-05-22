@@ -1,0 +1,19 @@
+{
+  "name": "@csbc-dev-examples/flags-demo-server",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "Self-contained WebSocket demo server for the @csbc-dev/feature-flags examples (FlagsCore + InMemoryFlagProvider + RemoteShellProxy).",
+  "scripts": {
+    "dev": "tsx watch demo-server.ts",
+    "start": "tsx demo-server.ts"
+  },
+  "dependencies": {
+    "@wc-bindable/remote": "^0.4.0",
+    "ws": "^8.20.0"
+  },
+  "devDependencies": {
+    "@types/ws": "^8.18.1",
+    "tsx": "^4.19.2"
+  }
+}

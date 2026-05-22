@@ -1,0 +1,19 @@
+{
+  "name": "@csbc-dev-examples/flags-wcstack-state",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@wc-bindable/core": "^0.4.0",
+    "@wc-bindable/remote": "^0.4.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3",
+    "vite": "^6.0.7"
+  }
+}

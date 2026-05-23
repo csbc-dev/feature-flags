@@ -4,8 +4,8 @@
  * Same idea as the React example: `<feature-flags>` is remote-only, so in a
  * framework you bind the server-side Core's `RemoteCoreProxy` straight into
  * reactive state — no custom element required. (The `<feature-flags>`
- * element is for the declarative `data-wcs` path; see the @wcstack-state
- * example.)
+ * element is for the declarative `data-wcs` path; see the wcstack-state
+ * example, which binds it with @wcstack/state.)
  */
 import { onMounted, onUnmounted, ref, type Ref } from "vue";
 import { bind } from "@wc-bindable/core";

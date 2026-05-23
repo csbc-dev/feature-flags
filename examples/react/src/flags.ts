@@ -5,8 +5,8 @@
  * browser observes its bindable surface through a `RemoteCoreProxy`. In a
  * framework like React you don't need the `<feature-flags>` custom element
  * at all — you bind the proxy straight into component state. (The element
- * exists for the *declarative* `data-wcs` path; see the @wcstack-state
- * example.)
+ * exists for the *declarative* `data-wcs` path; see the wcstack-state
+ * example, which binds it with @wcstack/state.)
  *
  * This file has three pieces:
  *   1. FLAGS_DECLARATION — the wcBindable surface, copied so the browser

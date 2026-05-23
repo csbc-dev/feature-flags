@@ -168,7 +168,8 @@ function escapeHtml(s: string): string {
 
 // bind() to the <feature-flags> ELEMENT (not the proxy). The element re-
 // dispatches the proxy's surface as its own events, which is exactly what
-// makes the declarative `data-wcs` path possible too (see @wcstack-state).
+// makes the declarative `data-wcs` path possible too (see the wcstack-state
+// example, which binds it with @wcstack/state).
 //
 // Keep the unbind handle and release it on unload — the React example calls
 // unbind() on effect cleanup and the Vue example calls it in onUnmounted, so

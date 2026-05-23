@@ -1,0 +1,15 @@
+{
+  "name": "@csbc-dev-examples/root",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "Orchestrator for the @csbc-dev/feature-flags examples. See CONVENTIONS.md.",
+  "scripts": {
+    "install:all": "npm --prefix server install --no-save && npm --prefix react install --no-save && npm --prefix vue install --no-save && npm --prefix vanilla install --no-save",
+    "build:pkg": "npm --prefix .. run build",
+    "build:examples": "npm --prefix react run build && npm --prefix vue run build && npm --prefix vanilla run build",
+    "build": "npm run build:pkg && npm run build:examples",
+    "serve": "npm --prefix server start",
+    "start": "npm run build && npm run serve"
+  }
+}

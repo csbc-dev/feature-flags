@@ -11,6 +11,9 @@ const repoRoot = resolve(here, "../..");
 // instead, point these at `dist/index.js` / `dist/server/index.js` and run
 // `npm run build` at the repo root first.
 export default defineConfig({
+  // Built output is served under the `/vanilla/` path prefix by the shared
+  // server, so asset URLs must be relative (see CONVENTIONS.md §2, §7.2).
+  base: "./",
   resolve: {
     alias: [
       // This browser example imports ONLY the root entry (`@csbc-dev/feature-flags`).
@@ -34,5 +37,9 @@ export default defineConfig({
     // Allow Vite to serve files from the repo root (the aliased package
     // source lives above this example directory).
     fs: { allow: [repoRoot] },
+    // Optional dev convenience: the documented run path is the shared server
+    // (see CONVENTIONS.md §2). When using Vite HMR instead, proxy the Core
+    // socket to the shared server so the derived `/ws` URL still works.
+    proxy: { "/ws": { target: "ws://localhost:8080", ws: true } },
   },
 });

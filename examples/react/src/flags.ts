@@ -45,7 +45,12 @@ export const FLAGS_DECLARATION: WcBindableDeclaration = {
   ],
 };
 
-export const DEMO_SERVER_URL = "ws://localhost:8787";
+// Same-origin socket — the shared server hosts the page AND the Core, so the
+// URL is derived from location, never hard-coded (see CONVENTIONS.md §5).
+export function flagsWsUrl(): string {
+  const proto = location.protocol === "https:" ? "wss" : "ws";
+  return `${proto}://${location.host}/ws`;
+}
 
 // Flag value types mirror the package's `FlagValue` / `FlagMap`.
 export type FlagValue =
@@ -70,7 +75,7 @@ export interface UseFeatureFlags extends FlagsState {
 }
 
 /** Open a WebSocket and wrap it in a RemoteCoreProxy. */
-export function createFlagsProxy(url = DEMO_SERVER_URL): {
+export function createFlagsProxy(url = flagsWsUrl()): {
   proxy: RemoteCoreProxy;
   close: () => void;
 } {
@@ -95,7 +100,7 @@ export function createFlagsProxy(url = DEMO_SERVER_URL): {
  * mount→unmount→mount cycle gets a fresh socket each time (and the previous
  * one is cleanly disposed) instead of binding to an already-disposed proxy.
  */
-export function useFeatureFlags(url = DEMO_SERVER_URL): UseFeatureFlags {
+export function useFeatureFlags(url = flagsWsUrl()): UseFeatureFlags {
   const [state, setState] = useState<FlagsState>({
     flags: {},
     identified: false,

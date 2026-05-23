@@ -3,112 +3,269 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>feature-flags · @wcstack-state</title>
-    <link rel="stylesheet" href="/src/styles.css" />
+    <title>feature-flags · @wcstack/state</title>
+
+    <!--
+      Import map. Resolves the bare specifiers used by the inline module below
+      AND by the served Shell:
+        - @csbc-dev/feature-flags → the BUILT package, served at /_pkg/ by the
+          shared server (this example is buildless, so it consumes the compiled
+          Shell rather than the TS source).
+        - @wc-bindable/* → pinned to the version the package was built against
+          (0.4.0) so the served Shell's `bind()` and <demo-session>'s proxy
+          share ONE module instance. Bump these together with the package's
+          dependency when it changes.
+    -->
+    <script type="importmap">
+      {
+        "imports": {
+          "@csbc-dev/feature-flags": "/_pkg/index.js",
+          "@wc-bindable/core": "https://esm.run/@wc-bindable/core@0.4.0",
+          "@wc-bindable/remote": "https://esm.run/@wc-bindable/remote@0.4.0"
+        }
+      }
+    </script>
+
+    <style>
+      :root {
+        font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+        color: #1c2433;
+        line-height: 1.5;
+      }
+      body { margin: 0; background: #f6f8fb; }
+      main { max-width: 720px; margin: 0 auto; padding: 2rem 1.25rem 4rem; }
+      h1 { font-size: 1.4rem; }
+      .hint { color: #5b6675; font-size: 0.9rem; }
+      code { background: #eef1f6; padding: 0.1em 0.35em; border-radius: 4px; font-size: 0.85em; }
+      .status { display: flex; gap: 1.25rem; flex-wrap: wrap; margin: 1rem 0; font-size: 0.9rem; }
+      .status .err b { color: #c0392b; }
+      .controls { display: flex; gap: 0.5rem; flex-wrap: wrap; margin-bottom: 1.5rem; }
+      button {
+        border: 1px solid #c9d2e0; background: #fff; border-radius: 6px;
+        padding: 0.45rem 0.8rem; cursor: pointer; font-size: 0.85rem;
+      }
+      button:hover { background: #eef3fb; }
+      .callout { margin-top: 1rem; padding: 0.75rem 1rem; background: #e8f5ff; border: 1px solid #b9defc; border-radius: 8px; }
+      .banner { margin-top: 1rem; padding: 0.75rem 1rem; background: #fff5e0; border: 1px solid #ffd98a; border-radius: 8px; }
+    </style>
+
+    <!--
+      (1) Register <feature-flags> and <demo-session> BEFORE the @wcstack/state
+          runtime scans the DOM. Module scripts run in document order, and
+          customElements.define() upgrades already-parsed elements synchronously,
+          so by the time <wcs-state> (registered by the /auto script below) scans
+          `data-wcs`, both elements are upgraded and their `static wcBindable`
+          (which the property + command bindings read) is available.
+    -->
+    <script type="module">
+      import { bootstrapFlags } from "@csbc-dev/feature-flags";
+      import {
+        createRemoteCoreProxy,
+        WebSocketClientTransport,
+      } from "@wc-bindable/remote";
+
+      // Same-origin socket — the shared server hosts the page AND the Core, so
+      // the URL is derived, never hard-coded (see examples/CONVENTIONS.md §5).
+      function flagsWsUrl() {
+        const proto = location.protocol === "https:" ? "wss" : "ws";
+        return `${proto}://${location.host}/ws`;
+      }
+
+      // FlagsCore bindable surface, needed to build the RemoteCoreProxy. MUST
+      // stay identical to FlagsCore.wcBindable. (The package does not re-export
+      // the declaration from its browser entry, so the proxy descriptor is
+      // declared here.)
+      const FLAGS_DECLARATION = {
+        protocol: "wc-bindable",
+        version: 1,
+        properties: [
+          { name: "flags", event: "feature-flags:flags-changed" },
+          { name: "identified", event: "feature-flags:identified-changed" },
+          { name: "loading", event: "feature-flags:loading-changed" },
+          { name: "error", event: "feature-flags:error" },
+        ],
+        commands: [
+          { name: "identify", async: true },
+          { name: "reload", async: true },
+        ],
+      };
+
+      // Minimal stand-in for <auth0-session>: <feature-flags> only needs a
+      // target exposing `.proxy` / `.ready` that fires
+      // `auth0-session:ready-changed`. That whole contract — without Auth0.
+      class DemoSession extends HTMLElement {
+        _proxy = null;
+        _ready = false;
+        _ws = null;
+        get proxy() { return this._proxy; }
+        get ready() { return this._ready; }
+        connectedCallback() {
+          this.style.display = "none";
+          const ws = new WebSocket(this.getAttribute("url") || flagsWsUrl());
+          this._ws = ws;
+          this._proxy = createRemoteCoreProxy(FLAGS_DECLARATION, new WebSocketClientTransport(ws));
+          ws.addEventListener("open", () => this._setReady(true));
+          ws.addEventListener("close", () => this._setReady(false));
+        }
+        disconnectedCallback() {
+          this._setReady(false);
+          this._proxy?.dispose();
+          this._ws?.close();
+          this._proxy = null;
+          this._ws = null;
+        }
+        _setReady(value) {
+          if (this._ready === value) return;
+          this._ready = value;
+          this.dispatchEvent(new CustomEvent("auth0-session:ready-changed", { detail: value }));
+        }
+      }
+      customElements.define("demo-session", DemoSession);
+
+      // Register <feature-flags>.
+      bootstrapFlags();
+    </script>
+
+    <!--
+      (2) @wcstack/state runtime — a single, pinned, self-registering CDN import.
+          The /auto entry registers <wcs-state> on load; there is no bootstrap
+          call (the library's Rule 3: initial load = tag definitions only). Bump
+          the pinned version when adopting a newer @wcstack/state and re-verify
+          the binding names against packages/state/README.md.
+    -->
+    <script type="module" src="https://esm.run/@wcstack/state@1.10.4/auto"></script>
   </head>
+
   <body>
     <main>
-      <h1>@csbc-dev/feature-flags — @wcstack-state</h1>
+      <h1>@csbc-dev/feature-flags — @wcstack/state</h1>
       <p class="hint">
         The <em>declarative</em> path. <code>&lt;feature-flags&gt;</code> publishes its
-        bindable surface into the <code>@wcstack-state</code> store via
+        bindable surface into the <code>&lt;wcs-state&gt;</code> store via
         <code>data-wcs</code>, and the rest of the page reads from that store —
         no per-flag JavaScript.
       </p>
 
       <!--
+        State: the app-facing keys the page binds to, plus command channels.
+        The DOM owns state here; <feature-flags> publishes INTO it. State is
+        updated by path assignment only (`this["a.b"] = …`) — though this
+        example never writes flags itself (the element does).
+      -->
+      <wcs-state>
+        <script type="module">
+          export default {
+            // Populated from <feature-flags> (element output → state path).
+            currentFlags: {},
+            flagsReady: false,
+            flagsLoading: false,
+            flagsError: null,
+
+            // Command channels routed to <feature-flags>'s commands. The
+            // element subscribes via `command.identify: $command.identifyFlags`
+            // below; emitting here invokes the element's method with the args.
+            $commandTokens: ["identifyFlags", "reloadFlags"],
+            identifyAlice() { this.$command.identifyFlags.emit("alice"); },
+            identifyBob()   { this.$command.identifyFlags.emit("bob"); },
+            identifyGuest() { this.$command.identifyFlags.emit("guest"); },
+            reload()        { this.$command.reloadFlags.emit(); },
+
+            // Render "none" instead of an empty error.
+            get errorMessage() {
+              return this.flagsError ? (this.flagsError.message || String(this.flagsError)) : "none";
+            },
+
+            // Computed views over the schema-less flag map. These do the nested
+            // access in plain JS on the WHOLE `currentFlags` object (one path
+            // read) rather than binding a deep path like
+            // `currentFlags.cta_text.value` directly — a deep path would make
+            // @wcstack/state's resolver walk through `undefined` intermediates
+            // on the first frame (before the first server snapshot, when
+            // `currentFlags` is still `{}`) and throw. Reading the whole map
+            // and guarding here keeps the first frame clean. Each getter
+            // depends on `currentFlags`, so a new map reassignment recomputes it.
+            get ctaText() {
+              const f = this.currentFlags;
+              return f && f.cta_text ? f.cta_text.value : "—";
+            },
+            get newCheckoutOn() {
+              const f = this.currentFlags;
+              return !!(f && f.new_checkout_flow && f.new_checkout_flow.enabled);
+            },
+            get darkModeOn() {
+              const f = this.currentFlags;
+              return !!(f && f.dark_mode && f.dark_mode.enabled);
+            },
+            get betaBannerOn() {
+              const f = this.currentFlags;
+              return !!(f && f.beta_banner && f.beta_banner.enabled);
+            },
+          };
+        </script>
+      </wcs-state>
+
+      <!--
         Transport (stands in for <auth0-session>) + the Shell.
 
-        `data-wcs="flags: currentFlags; ..."` PUBLISHES each bindable property
-        of <feature-flags> into the wcstack state store under the named key.
-        Everything below then CONSUMES those keys.
+        The left-hand names are the element's bindable PROPERTIES /
+        COMMANDS; the right-hand side are state paths / command tokens:
+          - `flags: currentFlags`         → element output flows into the store
+          - `command.identify: $command.identifyFlags`
+                                          → store can invoke the element's method
 
         NOTE on initial state: <feature-flags> holds `flags = {}` (frozen) and
         bind() replays that EMPTY map immediately — before the first server
-        snapshot arrives. So deep dotted paths like `currentFlags.cta_text.value`
-        and `currentFlags.new_checkout_flow.enabled` resolve to UNDEFINED for the
-        first frame(s). The vanilla example (which also uses <feature-flags>)
-        special-cases the empty map with a "Waiting…" placeholder; the
-        declarative bindings below instead tolerate undefined gracefully (text
-        renders blank, `if:` is falsy), so no per-flag guard is wired here. If
-        your runtime errors on undefined deep paths, gate the section on
-        `currentFlags` being populated first. (The React/Vue examples don't use
-        this element at all — their initial `{}` is a framework state seed; see
-        examples/README.md "Initial flag state".)
+        snapshot. So deep paths like `currentFlags.cta_text.value` and
+        `currentFlags.new_checkout_flow.enabled` resolve to UNDEFINED for the
+        first frame(s). The declarative bindings below tolerate that (text
+        renders blank, `if:` is falsy), so no per-flag guard is wired here.
       -->
-      <demo-session id="flags-session" url="ws://localhost:8787"></demo-session>
+      <demo-session id="flags-session"></demo-session>
       <feature-flags
         id="flags"
         target="flags-session"
-        data-wcs="flags: currentFlags; identified: flagsReady; loading: flagsLoading; error: flagsError">
+        data-wcs="flags: currentFlags;
+                  identified: flagsReady;
+                  loading: flagsLoading;
+                  error: flagsError;
+                  command.identify: $command.identifyFlags;
+                  command.reload: $command.reloadFlags">
       </feature-flags>
 
       <div class="status">
-        <span>identified: <b data-wcs="text: flagsReady">…</b></span>
-        <span>loading: <b data-wcs="text: flagsLoading">…</b></span>
-        <span>cta_text: <b data-wcs="text: currentFlags.cta_text.value">…</b></span>
-      </div>
-
-      <div class="controls">
-        <!--
-          Command invocation (identify / reload) is wired imperatively in
-          main.ts. How a declarative runtime expresses "call this command" is
-          library-specific, so we keep it out of the data-wcs markup here.
-        -->
-        <button data-identify="alice">identify("alice")</button>
-        <button data-identify="bob">identify("bob")</button>
-        <button data-identify="guest">identify("guest")</button>
-        <button id="btn-reload">reload()</button>
+        <span>identified: <b data-wcs="textContent: flagsReady">…</b></span>
+        <span>loading: <b data-wcs="textContent: flagsLoading">…</b></span>
+        <span>cta_text: <b data-wcs="textContent: ctaText">…</b></span>
+        <span class="err">error: <b data-wcs="textContent: errorMessage">…</b></span>
       </div>
 
       <!--
-        Conditional rendering driven by a single flag, via `data-wcs="if: …"`.
-        The <template> contents render only while the expression is truthy.
+        Commands are invoked declaratively: each button calls a state method,
+        which emits on a command token; the token invokes the element's command.
+        No getElementById / imperative `.identify(...)` glue anywhere.
       -->
-      <template data-wcs="if: currentFlags.new_checkout_flow.enabled">
+      <div class="controls">
+        <button data-wcs="onclick: identifyAlice">identify("alice")</button>
+        <button data-wcs="onclick: identifyBob">identify("bob")</button>
+        <button data-wcs="onclick: identifyGuest">identify("guest")</button>
+        <button data-wcs="onclick: reload">reload()</button>
+      </div>
+
+      <!-- Conditional rendering driven by a single flag, via `if:` on <template>.
+           Bound to computed getters (see the state script) rather than deep flag
+           paths, so the first frame (empty map) never walks through undefined. -->
+      <template data-wcs="if: newCheckoutOn">
         <p class="callout">🎉 New checkout flow is enabled for this identity.</p>
       </template>
 
-      <template data-wcs="if: currentFlags.dark_mode.enabled">
+      <template data-wcs="if: darkModeOn">
         <p class="callout">🌙 Dark mode is enabled for this identity.</p>
       </template>
 
       <!-- beta_banner is flipped by the server every few seconds — a live push. -->
-      <template data-wcs="if: currentFlags.beta_banner.enabled">
+      <template data-wcs="if: betaBannerOn">
         <div class="banner">✨ Beta banner is live (toggled server-side).</div>
       </template>
     </main>
-
-    <!-- 1) Register <feature-flags> and <demo-session>, wire command buttons. -->
-    <script type="module" src="/src/main.ts"></script>
-
-    <!--
-      2) Load the @wcstack-state declarative runtime from a CDN and start it.
-
-      IMPORTANT: @wcstack-state is not bundled with this example — it is fetched
-      at runtime from esm.sh. Confirm the published package name, version, and
-      init export against the real @wcstack-state docs and adjust the two lines
-      below if they differ. The `data-wcs` MARKUP above follows the documented
-      syntax (`key: statePath`, `text: …`, `if: …`); only the bootstrap call is
-      runtime-specific.
-
-      Two caveats with the import line below:
-        - The URL is UNPINNED, so esm.sh serves whatever `latest` is — for
-          anything beyond a throwaway demo pin a version, e.g.
-          `https://esm.sh/@wcstack-state@1.2.3`.
-        - The `mount` export name is a PLACEHOLDER / best guess; replace it with
-          the runtime's actual init export (and the call signature) from its docs.
-
-      This module runs AFTER main.ts (module scripts execute in document order),
-      so both custom elements are already defined when the runtime scans the DOM.
-    -->
-    <script type="module">
-      // import { mount } from "https://esm.sh/@wcstack-state@1.2.3";  // ← pin in real use
-      import { mount } from "https://esm.sh/@wcstack-state";
-      // Scan the document for `data-wcs` bindings and start reacting to the
-      // bindable elements. (If the real runtime auto-starts on import, this
-      // call is a harmless no-op / can be removed.)
-      mount(document.body);
-    </script>
   </body>
 </html>

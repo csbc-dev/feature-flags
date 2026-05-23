@@ -23,7 +23,12 @@ import {
   type RemoteCoreProxy,
 } from "@wc-bindable/remote";
 
-const DEMO_SERVER_URL = "ws://localhost:8787";
+// Same-origin socket — the shared server hosts the page AND the Core, so the
+// URL is derived from location, never hard-coded (see CONVENTIONS.md §5).
+function flagsWsUrl(): string {
+  const proto = location.protocol === "https:" ? "wss" : "ws";
+  return `${proto}://${location.host}/ws`;
+}
 
 // FlagsCore bindable surface, needed to build the RemoteCoreProxy below.
 // This example DOES import the browser entry (`@csbc-dev/feature-flags`), but
@@ -67,7 +72,7 @@ class DemoSession extends HTMLElement {
 
   connectedCallback(): void {
     this.style.display = "none";
-    const url = this.getAttribute("url") || DEMO_SERVER_URL;
+    const url = this.getAttribute("url") || flagsWsUrl();
     const ws = new WebSocket(url);
     this._ws = ws;
     const transport = new WebSocketClientTransport(ws);

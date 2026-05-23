@@ -9,5 +9,5 @@
     "noEmit": true,
     "types": ["node"]
   },
-  "include": ["demo-server.ts"]
+  "include": ["server.ts", "../shared/flagsDemoServer.ts"]
 }

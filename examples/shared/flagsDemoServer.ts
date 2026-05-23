@@ -85,7 +85,18 @@ async function serveStatic(
   mounts: Mount[],
   landingHtml: string,
 ): Promise<void> {
-  const pathname = decodeURIComponent(new URL(req.url || "/", "http://localhost").pathname);
+  // Parse + percent-decode the path defensively: `decodeURIComponent` throws a
+  // URIError on malformed escapes (e.g. a bare `%`), and an uncaught throw here
+  // would reject the handler promise and crash the whole server (taking every
+  // example down). A malformed URL is a client error, so answer 400 and move on.
+  let pathname: string;
+  try {
+    pathname = decodeURIComponent(new URL(req.url || "/", "http://localhost").pathname);
+  } catch {
+    res.writeHead(400, { "Content-Type": "text/plain; charset=utf-8" });
+    res.end("Bad Request");
+    return;
+  }
 
   if (pathname === "/") {
     res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
@@ -227,7 +238,16 @@ export function createFlagsDemoServer(options: FlagsDemoServerOptions): void {
   const { port, mounts, landingHtml, wsPath = "/ws" } = options;
 
   const httpServer = createServer((req, res) => {
-    void serveStatic(req, res, mounts, landingHtml);
+    // Safety net: serveStatic guards its own known failure modes, but a
+    // rejected handler promise must never go unhandled (Node aborts the
+    // process on an unhandled rejection, which would kill every example).
+    serveStatic(req, res, mounts, landingHtml).catch((err) => {
+      console.warn("[demo-server] request handler error:", err);
+      if (!res.headersSent) {
+        res.writeHead(500, { "Content-Type": "text/plain; charset=utf-8" });
+        res.end("Internal Server Error");
+      }
+    });
   });
 
   const wss = new WebSocketServer({ server: httpServer, path: wsPath });

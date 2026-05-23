@@ -101,6 +101,21 @@
         get ready() { return this._ready; }
         connectedCallback() {
           this.style.display = "none";
+          // Defer opening the socket until the page has fully loaded, so the
+          // declarative <wcs-state> bindings are wired up BEFORE the first
+          // server snapshot arrives. On a fast (localhost) connection the
+          // server's one-shot `identified` push can otherwise be dispatched
+          // before <wcs-state> has subscribed to this element — and unlike
+          // `flags` (which the demo re-pushes every ~4s, so a missed first
+          // push self-heals) a deduped one-shot value would then be missed for
+          // good, leaving `identified` stuck at false. A real <auth0-session>
+          // opens its socket only after auth completes, so it never races the
+          // initial bind; this `load` gate reproduces that ordering for the demo.
+          if (document.readyState === "complete") this._connect();
+          else window.addEventListener("load", () => this._connect(), { once: true });
+        }
+        _connect() {
+          if (this._ws) return;
           const ws = new WebSocket(this.getAttribute("url") || flagsWsUrl());
           this._ws = ws;
           this._proxy = createRemoteCoreProxy(FLAGS_DECLARATION, new WebSocketClientTransport(ws));
@@ -165,10 +180,15 @@
             // element subscribes via `command.identify: $command.identifyFlags`
             // below; emitting here invokes the element's method with the args.
             $commandTokens: ["identifyFlags", "reloadFlags"],
-            identifyAlice() { this.$command.identifyFlags.emit("alice"); },
-            identifyBob()   { this.$command.identifyFlags.emit("bob"); },
-            identifyGuest() { this.$command.identifyFlags.emit("guest"); },
-            reload()        { this.$command.reloadFlags.emit(); },
+            // emit() returns the subscribers' results; <feature-flags>'s
+            // identify()/reload() REJECT if clicked before the session proxy is
+            // ready. Wrap in allSettled so that early click never becomes an
+            // unhandled promise rejection (the vanilla/react/vue examples .catch
+            // the same calls; this is the declarative equivalent).
+            identifyAlice() { Promise.allSettled(this.$command.identifyFlags.emit("alice")); },
+            identifyBob()   { Promise.allSettled(this.$command.identifyFlags.emit("bob")); },
+            identifyGuest() { Promise.allSettled(this.$command.identifyFlags.emit("guest")); },
+            reload()        { Promise.allSettled(this.$command.reloadFlags.emit()); },
 
             // Render "none" instead of an empty error.
             get errorMessage() {

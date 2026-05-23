@@ -22,10 +22,13 @@ const mounts: Mount[] = [
   { prefix: "/react/", root: resolve(examplesRoot, "react/dist") },
   { prefix: "/vue/", root: resolve(examplesRoot, "vue/dist") },
   { prefix: "/vanilla/", root: resolve(examplesRoot, "vanilla/dist") },
-  // wcstack-state is buildless (single file) — served raw.
+  // wcstack-state is buildless — served raw (its index.html + shared modules).
   { prefix: "/wcstack-state/", root: resolve(examplesRoot, "wcstack-state") },
   // The built package, imported by the wcstack-state example's Shell.
   { prefix: "/_pkg/", root: resolve(repoRoot, "dist") },
+  // Shared browser modules (the <demo-session> transport), loaded buildless by
+  // the wcstack-state example; the vanilla example bundles the same source.
+  { prefix: "/_shared/", root: resolve(examplesRoot, "shared") },
 ];
 
 const EXAMPLES = [

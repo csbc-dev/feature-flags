@@ -50,94 +50,23 @@
     </style>
 
     <!--
-      (1) Register <feature-flags> and <demo-session> BEFORE the @wcstack/state
-          runtime scans the DOM. Module scripts run in document order, and
-          customElements.define() upgrades already-parsed elements synchronously,
-          so by the time <wcs-state> (registered by the /auto script below) scans
-          `data-wcs`, both elements are upgraded and their `static wcBindable`
-          (which the property + command bindings read) is available.
+      (1) Register <demo-session> (the shared demo transport) and <feature-flags>
+          BEFORE the @wcstack/state runtime scans the DOM. Module scripts run in
+          document order, and customElements.define() upgrades already-parsed
+          elements synchronously, so by the time <wcs-state> (registered by the
+          /auto script below) scans `data-wcs`, both elements are upgraded and
+          their `static wcBindable` (which the property + command bindings read)
+          is available.
+
+          The <demo-session> transport is the SAME module the vanilla example
+          bundles — examples/shared/demo-session — served here at /_shared/ by
+          the demo server; its `auto.js` defines the element as a side effect.
+          (This relaxes "single file" by one shared, reused module; the example's
+          own state + data-wcs bindings still live entirely in this file.)
     -->
+    <script type="module" src="/_shared/demo-session/auto.js"></script>
     <script type="module">
       import { bootstrapFlags } from "@csbc-dev/feature-flags";
-      import {
-        createRemoteCoreProxy,
-        WebSocketClientTransport,
-      } from "@wc-bindable/remote";
-
-      // Same-origin socket — the shared server hosts the page AND the Core, so
-      // the URL is derived, never hard-coded (see examples/CONVENTIONS.md §5).
-      function flagsWsUrl() {
-        const proto = location.protocol === "https:" ? "wss" : "ws";
-        return `${proto}://${location.host}/ws`;
-      }
-
-      // FlagsCore bindable surface, needed to build the RemoteCoreProxy. MUST
-      // stay identical to FlagsCore.wcBindable. (The package does not re-export
-      // the declaration from its browser entry, so the proxy descriptor is
-      // declared here.)
-      const FLAGS_DECLARATION = {
-        protocol: "wc-bindable",
-        version: 1,
-        properties: [
-          { name: "flags", event: "feature-flags:flags-changed" },
-          { name: "identified", event: "feature-flags:identified-changed" },
-          { name: "loading", event: "feature-flags:loading-changed" },
-          { name: "error", event: "feature-flags:error" },
-        ],
-        commands: [
-          { name: "identify", async: true },
-          { name: "reload", async: true },
-        ],
-      };
-
-      // Minimal stand-in for <auth0-session>: <feature-flags> only needs a
-      // target exposing `.proxy` / `.ready` that fires
-      // `auth0-session:ready-changed`. That whole contract — without Auth0.
-      class DemoSession extends HTMLElement {
-        _proxy = null;
-        _ready = false;
-        _ws = null;
-        get proxy() { return this._proxy; }
-        get ready() { return this._ready; }
-        connectedCallback() {
-          this.style.display = "none";
-          // Defer opening the socket until the page has fully loaded, so the
-          // declarative <wcs-state> bindings are wired up BEFORE the first
-          // server snapshot arrives. On a fast (localhost) connection the
-          // server's one-shot `identified` push can otherwise be dispatched
-          // before <wcs-state> has subscribed to this element — and unlike
-          // `flags` (which the demo re-pushes every ~4s, so a missed first
-          // push self-heals) a deduped one-shot value would then be missed for
-          // good, leaving `identified` stuck at false. A real <auth0-session>
-          // opens its socket only after auth completes, so it never races the
-          // initial bind; this `load` gate reproduces that ordering for the demo.
-          if (document.readyState === "complete") this._connect();
-          else window.addEventListener("load", () => this._connect(), { once: true });
-        }
-        _connect() {
-          if (this._ws) return;
-          const ws = new WebSocket(this.getAttribute("url") || flagsWsUrl());
-          this._ws = ws;
-          this._proxy = createRemoteCoreProxy(FLAGS_DECLARATION, new WebSocketClientTransport(ws));
-          ws.addEventListener("open", () => this._setReady(true));
-          ws.addEventListener("close", () => this._setReady(false));
-        }
-        disconnectedCallback() {
-          this._setReady(false);
-          this._proxy?.dispose();
-          this._ws?.close();
-          this._proxy = null;
-          this._ws = null;
-        }
-        _setReady(value) {
-          if (this._ready === value) return;
-          this._ready = value;
-          this.dispatchEvent(new CustomEvent("auth0-session:ready-changed", { detail: value }));
-        }
-      }
-      customElements.define("demo-session", DemoSession);
-
-      // Register <feature-flags>.
       bootstrapFlags();
     </script>
 

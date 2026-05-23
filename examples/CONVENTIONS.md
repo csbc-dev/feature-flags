@@ -95,13 +95,18 @@ examples/
 │   ├── server.ts
 │   ├── package.json
 │   └── tsconfig.json
-├── shared/                 # reusable server building blocks
-│   └── flagsDemoServer.ts  # createFlagsDemoServer(): static + WebSocket(FlagsCore)
+├── shared/                 # reusable building blocks
+│   ├── flagsDemoServer.ts  # createFlagsDemoServer(): static + WebSocket(FlagsCore)
+│   └── demo-session/       # the <demo-session> transport, shared by the
+│       ├── DemoSession.js  #   Shell-bound examples (class definition)
+│       ├── index.js        #   distribution entry: re-exports + defineDemoSession()
+│       ├── index.d.ts      #   types for the bundled (vanilla) import
+│       └── auto.js         #   side-effect entry: defines <demo-session> on load
 ├── react/                  # vite build → dist/, served at /react/
 ├── vue/                    # vite build → dist/, served at /vue/
-├── vanilla/                # vite build → dist/, served at /vanilla/
+├── vanilla/                # vite build → dist/, served at /vanilla/  (imports demo-session)
 └── wcstack-state/
-    └── index.html          # SINGLE FILE (see §7.4)
+    └── index.html          # one file for the example's state + bindings (see §7.4)
 ```
 
 Compiled `react/dist`, `vue/dist`, `vanilla/dist` and the repo `dist/` are build
@@ -134,9 +139,11 @@ example only *observes* `FlagsCore` over the `/ws` `RemoteShellProxy`. The demo
 server stands in for the production `createAuthenticatedWSS` stack — no Auth0, no
 SaaS account — but speaks the exact same wire protocol.
 
-The wcBindable **declaration** the proxy needs (`FLAGS_DECLARATION`) is copied
-into each proxy-bound example (react, vue) so a browser bundle never imports the
-server entry or a provider SDK. It MUST stay identical to `FlagsCore.wcBindable`.
+The wcBindable **declaration** the proxy needs (`FLAGS_DECLARATION`) is declared
+client-side — in each proxy-bound example (react, vue) and in the shared
+`demo-session` module the Shell-bound examples use — so a browser bundle never
+imports the server entry or a provider SDK. Every copy MUST stay identical to
+`FlagsCore.wcBindable`.
 
 ---
 
@@ -155,13 +162,15 @@ server entry or a provider SDK. It MUST stay identical to `FlagsCore.wcBindable`
 
 ### 7.2 vanilla (Shell-bound, compiled)
 
-- Drives the real `<feature-flags>` Shell plus a tiny `<demo-session>` element
+- Drives the real `<feature-flags>` Shell plus the shared `<demo-session>`
+  element (`examples/shared/demo-session`, registered via `defineDemoSession()`)
   that supplies the transport in place of `<auth0-session>` (it exposes `.proxy`
   / `.ready` and fires `auth0-session:ready-changed`).
 - `bind()` to the **element** (not the proxy) — the Shell re-dispatches the proxy
   surface as its own events.
 - Built with Vite (`base: "./"`); the Shell is bundled from the package source
-  via a `tsconfig`/Vite alias to `../../src`.
+  via a `tsconfig`/Vite alias to `../../src`, and the shared `demo-session`
+  module is bundled from `../../shared`.
 
 ### 7.3 Initial flag state
 
@@ -180,8 +189,12 @@ The empty map `{}` arrives differently per family — document it where it bites
 
 This example is held to `@wcstack/state`'s own five rules. It MUST be:
 
-1. **A single file** — `index.html` only. No `src/`, no `package.json`, no Vite,
-   no build step. CSS is inlined.
+1. **One file for the example itself** — the state, `data-wcs` bindings, and CSS
+   all live in `index.html`. No `src/`, no `package.json`, no Vite, no build
+   step. The only thing it pulls in beyond the runtime + Shell is the shared
+   `<demo-session>` transport (the *same* module the vanilla example bundles),
+   loaded over the server's `/_shared/` mount — keeping the binding lesson
+   readable in one file without re-duplicating the reused plumbing.
 2. **CDN-based for the runtime** — `@wcstack/state` is loaded with its
    self-registering auto entry and **pinned**:
 
@@ -194,11 +207,14 @@ This example is held to `@wcstack/state`'s own five rules. It MUST be:
 3. **State declared inline** in `<wcs-state><script type="module">export default
    {…}</script></wcs-state>`. Update by **path assignment** (`this["a.b"] = …`),
    never `this.a.b = …`.
-4. **The Shell comes from the built package** over the shared server: an
-   `importmap` maps `@csbc-dev/feature-flags` → `/_pkg/index.js`, and
+4. **The Shell and transport come over the shared server**: an `importmap` maps
+   `@csbc-dev/feature-flags` → `/_pkg/index.js` (the built package), and
    `@wc-bindable/core` / `@wc-bindable/remote` → pinned esm.run URLs that **match
-   the version the package was built against** (currently `0.4.0`), so the served
-   Shell and the inline `<demo-session>` share one module instance.
+   the version the package was built against** (currently `0.4.0`). The shared
+   `<demo-session>` is loaded with
+   `<script type="module" src="/_shared/demo-session/auto.js">`; its
+   `@wc-bindable/remote` import resolves through the same import map, so the
+   served Shell and the transport share one module instance.
 5. **Bindings follow the current `@wcstack/state` spec**, not guesses:
    - Element output properties → state paths:
      `data-wcs="flags: currentFlags; identified: flagsReady; loading: flagsLoading; error: flagsError"`.
@@ -220,11 +236,12 @@ This example is held to `@wcstack/state`'s own five rules. It MUST be:
      This requires the element's `wcBindable.commands` to be the object form
      `[{ name, async? }]` (the string form was removed in `@wcstack/state`
      v1.9.1). `FlagsCore.wcBindable` already uses the object form.
-6. **Ordering**: the inline module that registers `<feature-flags>` /
-   `<demo-session>` (`bootstrapFlags()` + `customElements.define`) must run
-   **before** the `@wcstack/state/auto` script in document order, so the elements
-   are upgraded (and their `static wcBindable` is readable) by the time
-   `<wcs-state>` scans `data-wcs`.
+6. **Ordering**: the scripts that register `<demo-session>` (the
+   `/_shared/demo-session/auto.js` module) and `<feature-flags>` (the inline
+   `bootstrapFlags()` module) must run **before** the `@wcstack/state/auto`
+   script in document order. Module scripts execute in order, so by the time
+   `<wcs-state>` scans `data-wcs` both elements are upgraded and their
+   `static wcBindable` is readable.
 
 When `@wcstack/state` ships a new version, bump the pinned CDN version here and
 re-verify the binding names against `packages/state/README.md` in the wcstack

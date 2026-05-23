@@ -81,11 +81,14 @@ rules change the flag map, and **reload()** to force a fresh snapshot. The
   wcBindable **declaration** (`FLAGS_DECLARATION`, copied into `src/flags.ts`)
   plus `@wc-bindable/core` and `@wc-bindable/remote` — all bundled by Vite.
 - **vanilla** imports the `<feature-flags>` Shell from the package **source** via
-  a Vite alias to `../../src`, and Vite bundles it.
-- **wcstack-state** is buildless and single-file: it imports the **built** Shell
-  from `/_pkg/index.js` (served by the shared server) through an import map, and
-  loads `@wcstack/state` from a pinned CDN URL. See its `index.html` and
-  CONVENTIONS.md §7.4.
+  a Vite alias to `../../src`, and the shared `<demo-session>` transport from
+  `../../shared/demo-session`; Vite bundles both.
+- **wcstack-state** is buildless: its own state + `data-wcs` bindings live in one
+  `index.html`. It imports the **built** Shell from `/_pkg/index.js` and loads
+  the shared `<demo-session>` from `/_shared/demo-session/auto.js` (both served
+  by the shared server) through an import map, plus `@wcstack/state` from a pinned
+  CDN URL. The `<demo-session>` source is the *same* module vanilla bundles. See
+  its `index.html` and CONVENTIONS.md §7.4.
 
 ---
 

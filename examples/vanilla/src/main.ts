@@ -16,91 +16,13 @@
 import { bootstrapFlags } from "@csbc-dev/feature-flags";
 import type { Flags, FlagMap, FlagValue } from "@csbc-dev/feature-flags";
 import { bind } from "@wc-bindable/core";
-import type { WcBindableDeclaration } from "@wc-bindable/core";
-import {
-  createRemoteCoreProxy,
-  WebSocketClientTransport,
-  type RemoteCoreProxy,
-} from "@wc-bindable/remote";
+import { defineDemoSession } from "../../shared/demo-session/index.js";
 
-// Same-origin socket — the shared server hosts the page AND the Core, so the
-// URL is derived from location, never hard-coded (see CONVENTIONS.md §5).
-function flagsWsUrl(): string {
-  const proto = location.protocol === "https:" ? "wss" : "ws";
-  return `${proto}://${location.host}/ws`;
-}
-
-// FlagsCore bindable surface, needed to build the RemoteCoreProxy below.
-// This example DOES import the browser entry (`@csbc-dev/feature-flags`), but
-// the root entry does not re-export the wcBindable declaration —
-// `FLAGS_WC_BINDABLE` is an internal const in `src/wcBindable.ts` — so the
-// proxy's descriptor has to be declared here. MUST stay identical to
-// `FlagsCore.wcBindable`. (The React/Vue copies exist for a different reason:
-// avoiding a server-entry import in a framework bundle.)
-const FLAGS_DECLARATION: WcBindableDeclaration = {
-  protocol: "wc-bindable",
-  version: 1,
-  properties: [
-    { name: "flags", event: "feature-flags:flags-changed" },
-    { name: "identified", event: "feature-flags:identified-changed" },
-    { name: "loading", event: "feature-flags:loading-changed" },
-    { name: "error", event: "feature-flags:error" },
-  ],
-  commands: [
-    { name: "identify", async: true },
-    { name: "reload", async: true },
-  ],
-};
-
-/**
- * Minimal stand-in for <auth0-session>. <feature-flags> only needs a target
- * element that structurally exposes `.proxy` (a RemoteCoreProxy) and `.ready`
- * (a boolean), and that fires `auth0-session:ready-changed` when readiness
- * flips. That's the whole contract — so we can satisfy it without Auth0.
- */
-class DemoSession extends HTMLElement {
-  private _proxy: RemoteCoreProxy | null = null;
-  private _ready = false;
-  private _ws: WebSocket | null = null;
-
-  get proxy(): RemoteCoreProxy | null {
-    return this._proxy;
-  }
-  get ready(): boolean {
-    return this._ready;
-  }
-
-  connectedCallback(): void {
-    this.style.display = "none";
-    const url = this.getAttribute("url") || flagsWsUrl();
-    const ws = new WebSocket(url);
-    this._ws = ws;
-    const transport = new WebSocketClientTransport(ws);
-    // Proxy is created up front; it buffers its `sync` request until the
-    // socket opens. We flip `ready` on open so <feature-flags> binds only
-    // once the transport is live.
-    this._proxy = createRemoteCoreProxy(FLAGS_DECLARATION, transport);
-    ws.addEventListener("open", () => this._setReady(true));
-    ws.addEventListener("close", () => this._setReady(false));
-  }
-
-  disconnectedCallback(): void {
-    this._setReady(false);
-    this._proxy?.dispose();
-    this._ws?.close();
-    this._proxy = null;
-    this._ws = null;
-  }
-
-  private _setReady(value: boolean): void {
-    if (this._ready === value) return;
-    this._ready = value;
-    this.dispatchEvent(new CustomEvent("auth0-session:ready-changed", { detail: value }));
-  }
-}
-customElements.define("demo-session", DemoSession);
-
-// Register <feature-flags>.
+// Register <demo-session> (the shared demo transport — the SAME module the
+// wcstack-state example loads buildless over the server's /_shared/ mount; here
+// Vite bundles it) and the <feature-flags> Shell. <demo-session> stands in for
+// <auth0-session>: it opens the socket and exposes `.proxy` / `.ready`.
+defineDemoSession();
 bootstrapFlags();
 
 // --- Render -----------------------------------------------------------------

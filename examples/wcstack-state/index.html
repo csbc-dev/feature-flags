@@ -6,8 +6,9 @@
     <title>feature-flags · @wcstack/state</title>
 
     <!--
-      Import map. The built package (the Shell + its /auto entry) is served at
-      /_pkg/ and its modules import each other RELATIVELY, so no bare
+      Import map. The built package is served under /_pkg/ at its published
+      layout (its /auto entry at /_pkg/src/auto/, the compiled Shell at
+      /_pkg/dist/) and its modules import each other RELATIVELY, so no bare
       @csbc-dev/feature-flags mapping is needed. What DOES need mapping are the
       bare @wc-bindable/* specifiers reached from the served Shell (`bind()` from
       /core) and the shared <demo-session> (the RemoteCoreProxy from /remote).
@@ -59,11 +60,12 @@
           declarative state + bindings below:
             - <demo-session> from /_shared/demo-session (the SAME module the
               vanilla example bundles).
-            - <feature-flags> from the built package's /auto entry, /_pkg/auto.js
-              (equivalent to importing @csbc-dev/feature-flags/auto).
+            - <feature-flags> from the built package's /auto entry,
+              /_pkg/src/auto/auto.min.js (the exact file npm ships for the
+              "@csbc-dev/feature-flags/auto" export).
     -->
     <script type="module" src="/_shared/demo-session/auto.js"></script>
-    <script type="module" src="/_pkg/auto.js"></script>
+    <script type="module" src="/_pkg/src/auto/auto.min.js"></script>
 
     <!--
       (2) @wcstack/state runtime — a single, pinned, self-registering CDN import.

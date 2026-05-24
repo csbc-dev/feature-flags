@@ -12,7 +12,15 @@
     "skipLibCheck": true,
     "resolveJsonModule": true,
     "isolatedModules": true,
-    "types": ["vite/client"]
+    "types": ["vite/client"],
+    // Resolve `@csbc-dev/feature-flags` to the package SOURCE, mirroring the
+    // Vite alias in vite.config.ts so the typecheck and the bundle agree.
+    // `paths` are resolved relative to this tsconfig (no `baseUrl` — it is
+    // deprecated in TS 7.0).
+    "paths": {
+      "@csbc-dev/feature-flags": ["../../src/index.ts"],
+      "@csbc-dev/feature-flags/server": ["../../src/server/index.ts"]
+    }
   },
   "include": ["src", "vite.config.ts"]
 }

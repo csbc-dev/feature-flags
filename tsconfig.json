@@ -13,5 +13,10 @@
     "skipLibCheck": true,
     "lib": ["ES2020", "DOM"]
   },
-  "include": ["src"]
+  "include": ["src"],
+  // `src/auto/` is a hand-authored, ship-as-is side-effect entry (auto.js /
+  // auto.min.js / auto.d.ts). It imports the COMPILED `../../dist/index.js`, so
+  // it must NOT be run through `tsc` — exclude it from the emit (and from the
+  // test-config that extends this one).
+  "exclude": ["src/auto"]
 }

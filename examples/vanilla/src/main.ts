@@ -1,10 +1,11 @@
 /**
  * Vanilla example for @csbc-dev/feature-flags.
  *
- * Unlike the React / Vue examples (which bind the RemoteCoreProxy directly),
- * this one drives the actual <feature-flags> Shell element — the package's
- * primary deliverable — plus a tiny <demo-session> element that supplies the
- * transport in place of <auth0-session>.
+ * Like every example here, this drives the actual <feature-flags> Shell element —
+ * the package's primary deliverable — plus a tiny <demo-session> element that
+ * supplies the transport in place of <auth0-session>. Where React / Vue bind the
+ * Shell with the official `useWcBindable` adapter, this one uses the lowest-level
+ * `bind()` primitive directly, with no framework.
  *
  * Pipeline:
  *   <demo-session>  opens the socket, exposes `.proxy` / `.ready`
@@ -93,11 +94,11 @@ function escapeHtml(s: string): string {
 // makes the declarative `data-wcs` path possible too (see the wcstack-state
 // example, which binds it with @wcstack/state).
 //
-// Keep the unbind handle and release it on unload — the React example calls
-// unbind() on effect cleanup and the Vue example calls it in onUnmounted, so
-// this matches their lifecycle discipline rather than leaking the
-// subscription. (A standalone page has no component teardown, so beforeunload
-// is the equivalent hook.)
+// Keep the unbind handle and release it on unload — the React / Vue examples get
+// this for free (useWcBindable unbinds on effect cleanup / unmount), so doing it
+// here matches that lifecycle discipline rather than leaking the subscription.
+// (A standalone page has no component teardown, so beforeunload is the
+// equivalent hook.)
 const unbind = bind(flagsEl, (name, value) => {
   switch (name) {
     case "flags":

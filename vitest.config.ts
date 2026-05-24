@@ -12,7 +12,6 @@ export default defineConfig({
       exclude: [
         "src/types.ts",
         "src/index.ts",
-        "src/auto.ts",
         "src/server/index.ts",
       ],
       thresholds: {

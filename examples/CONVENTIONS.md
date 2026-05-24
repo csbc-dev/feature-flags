@@ -22,16 +22,23 @@ Every package ships exactly these four browser examples, in this order:
 
 | Dir | Integration style | What it proves |
 |---|---|---|
-| `react/` | bind the `RemoteCoreProxy` into React state | `useFeatureFlags()` hook |
-| `vue/` | bind the `RemoteCoreProxy` into reactive refs | `useFeatureFlags()` composable |
-| `vanilla/` | the `<feature-flags>` Shell element + `bind()` | imperative DOM, no framework |
+| `react/` | the `<feature-flags>` Shell + `useWcBindable` (`@wc-bindable/react`) | the official React adapter |
+| `vue/` | the `<feature-flags>` Shell + `useWcBindable` (`@wc-bindable/vue`) | the official Vue adapter |
+| `vanilla/` | the `<feature-flags>` Shell element + raw `bind()` | imperative DOM, no framework |
 | `wcstack-state/` | the `<feature-flags>` Shell + `data-wcs` | declarative binding, zero per-flag JS |
 
-Two consumption families are deliberately covered:
+All four are **Shell-bound** — they drive the real `<feature-flags>` element
+(the package's primary deliverable). What differs is *how* the Shell is bound:
 
-- **Proxy-bound** (react, vue) — idiomatic inside a framework; no custom element.
-- **Shell-bound** (vanilla, wcstack-state) — drive the real `<feature-flags>`
-  Shell, which is the package's primary deliverable.
+- **Raw `bind()`** (vanilla) — the lowest-level `@wc-bindable/core` primitive.
+- **Official framework adapter** (react, vue) — `useWcBindable`, which wraps
+  `bind()` and the element's ref into one hook/composable.
+- **Declarative `data-wcs`** (wcstack-state) — no per-flag JavaScript at all.
+
+Every example pairs the Shell with the shared `<demo-session>` transport (the
+stand-in for `<auth0-session>`). Binding the `RemoteCoreProxy` directly — without
+the element — is possible (it's the `@wc-bindable/remote` primitive), but is not
+demonstrated here: the element + official adapter is the idiomatic path.
 
 Do not add a fifth framework folder without updating this document first.
 
@@ -102,9 +109,9 @@ examples/
 │       ├── index.js        #   distribution entry: re-exports + defineDemoSession()
 │       ├── index.d.ts      #   types for the bundled (vanilla) import
 │       └── auto.js         #   side-effect entry: defines <demo-session> on load
-├── react/                  # vite build → dist/, served at /react/
-├── vue/                    # vite build → dist/, served at /vue/
-├── vanilla/                # vite build → dist/, served at /vanilla/  (imports demo-session)
+├── react/                  # vite build → dist/, served at /react/ (Shell + demo-session via useWcBindable)
+├── vue/                    # vite build → dist/, served at /vue/   (Shell + demo-session via useWcBindable)
+├── vanilla/                # vite build → dist/, served at /vanilla/  (Shell + demo-session via raw bind())
 └── wcstack-state/
     └── index.html          # one file for the example's state + bindings (see §7.4)
 ```
@@ -140,23 +147,33 @@ server stands in for the production `createAuthenticatedWSS` stack — no Auth0,
 SaaS account — but speaks the exact same wire protocol.
 
 The wcBindable **declaration** the proxy needs (`FLAGS_DECLARATION`) is declared
-client-side — in each proxy-bound example (react, vue) and in the shared
-`demo-session` module the Shell-bound examples use — so a browser bundle never
-imports the server entry or a provider SDK. Every copy MUST stay identical to
-`FlagsCore.wcBindable`.
+client-side — in the shared `demo-session` module every example uses to build the
+`RemoteCoreProxy` — so a browser bundle never imports the server entry or a
+provider SDK. That copy MUST stay identical to `FlagsCore.wcBindable`.
 
 ---
 
 ## 7. Per-target rules
 
-### 7.1 react / vue (proxy-bound)
+### 7.1 react / vue (Shell-bound via the official adapter)
 
-- Bind the `RemoteCoreProxy` straight into framework state. Do **not** use the
-  `<feature-flags>` custom element — that is what the Shell-bound examples are for.
-- `@wc-bindable/core` (`bind`) + `@wc-bindable/remote` (`createRemoteCoreProxy`,
-  `WebSocketClientTransport`) are npm deps, bundled by Vite.
-- Tear down on unmount: `unbind()` + close the socket (effect cleanup /
-  `onUnmounted`).
+- Render the real `<feature-flags>` Shell plus the shared `<demo-session>`
+  transport, and bind the Shell with `useWcBindable` from `@wc-bindable/react` /
+  `@wc-bindable/vue` (an npm dep). The adapter is **element-based**: it takes a
+  ref to the element and returns the bound `values` — it handles the
+  subscribe / initial-replay / cleanup that a hand-rolled `bind()` hook did.
+- `useWcBindable` binds the element's output **properties** only. **Commands**
+  (`identify` / `reload`) are not part of the bound surface — keep a ref to the
+  element and call its methods (compose it with the adapter's ref). Guard the
+  calls with `.catch` (they reject before the session is ready).
+- Register both elements before the app mounts (`defineDemoSession()` +
+  `bootstrapFlags()` in `main.tsx` / `main.ts`). The Shell tolerates mounting
+  before its target resolves, so framework render order is not a concern.
+- The package + shared `<demo-session>` are consumed from **source** (like
+  vanilla): a Vite alias to `../../src` plus a matching tsconfig `paths` entry so
+  the `tsc` / `vue-tsc` typecheck and the Vite bundle agree. Vue additionally
+  sets `compilerOptions.isCustomElement` so `<feature-flags>` / `<demo-session>`
+  are mounted as custom elements, not resolved as Vue components.
 - `vite.config` sets `base: "./"` so built asset URLs resolve under the `/react/`
   (or `/vue/`) path prefix. Keep an optional `dev` script that proxies `/ws`.
 
@@ -174,16 +191,16 @@ imports the server entry or a provider SDK. Every copy MUST stay identical to
 
 ### 7.3 Initial flag state
 
-The empty map `{}` arrives differently per family — document it where it bites:
+All four are Shell-bound, so the empty map `{}` arrives the same way:
+`<feature-flags>` holds `flags = {}` frozen and `bind()` replays it synchronously
+before the first server snapshot, so deep paths (`currentFlags.cta_text.value`)
+are `undefined` for the first frame. Handle it where it bites:
 
-- **Shell-bound**: `<feature-flags>` holds `flags = {}` frozen and `bind()`
-  replays it synchronously before the first server snapshot, so deep paths
-  (`currentFlags.cta_text.value`) are `undefined` for the first frame. vanilla
-  shows a "Waiting…" placeholder; wcstack-state relies on bindings tolerating
-  undefined.
-- **Proxy-bound**: the `{}` is the framework's own state seed; the proxy's cached
-  `flags` is `undefined` until the first `sync`, so react/vue get no initial
-  `flags` callback.
+- **vanilla** shows a "Waiting…" placeholder; **wcstack-state** relies on
+  bindings tolerating undefined.
+- **react / vue** seed `useWcBindable` with explicit initial values
+  (`{ flags: {}, identified: false, loading: false, error: null }`) so the first
+  render is clean before the Shell's replayed `{}` arrives.
 
 ### 7.4 wcstack-state (Shell-bound, declarative) — the strict rules
 
@@ -210,10 +227,12 @@ This example is held to `@wcstack/state`'s own five rules. It MUST be:
 4. **No inline JavaScript — both elements register via side-effect `/auto`
    scripts** served by the demo server:
    - `<feature-flags>` from the built package's `/auto` entry,
-     `<script type="module" src="/_pkg/auto.js">` (equivalent to
-     `import "@csbc-dev/feature-flags/auto"`). Its modules import each other
-     relatively under `/_pkg/`, so **no** bare `@csbc-dev/feature-flags` import
-     map entry is needed.
+     `<script type="module" src="/_pkg/src/auto/auto.min.js">` — the exact file
+     npm ships for the `@csbc-dev/feature-flags/auto` export (equivalent to
+     `import "@csbc-dev/feature-flags/auto"`). It is served at the package's
+     published layout under `/_pkg/` (`/auto` at `/_pkg/src/auto/`, the compiled
+     Shell at `/_pkg/dist/`) and its modules import each other relatively, so
+     **no** bare `@csbc-dev/feature-flags` import map entry is needed.
    - `<demo-session>` from `<script type="module" src="/_shared/demo-session/auto.js">`.
 
    The `importmap` therefore only maps the bare `@wc-bindable/core` /
@@ -243,8 +262,9 @@ This example is held to `@wcstack/state`'s own five rules. It MUST be:
      `[{ name, async? }]` (the string form was removed in `@wcstack/state`
      v1.9.1). `FlagsCore.wcBindable` already uses the object form.
 6. **Ordering**: the `/auto` scripts that register `<demo-session>`
-   (`/_shared/demo-session/auto.js`) and `<feature-flags>` (`/_pkg/auto.js`)
-   must run **before** the `@wcstack/state/auto` script in document order.
+   (`/_shared/demo-session/auto.js`) and `<feature-flags>`
+   (`/_pkg/src/auto/auto.min.js`) must run **before** the `@wcstack/state/auto`
+   script in document order.
    Module scripts execute in order, so by the time
    `<wcs-state>` scans `data-wcs` both elements are upgraded and their
    `static wcBindable` is readable.

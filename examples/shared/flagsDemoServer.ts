@@ -5,8 +5,10 @@
  *
  *   1. Static file serving for each example's compiled output, under a path
  *      prefix (`/react/`, `/vue/`, `/vanilla/`, `/wcstack-state/`).
- *   2. Serves the built package at `/_pkg/` (→ repo `dist/`) so the buildless
- *      wcstack-state example can `import` the real <feature-flags> Shell.
+ *   2. Serves the built package under `/_pkg/` at its published layout
+ *      (`/_pkg/src/auto/` → repo `src/auto/`, `/_pkg/dist/` → repo `dist/`) so
+ *      the buildless wcstack-state example can load the real `/auto` entry and
+ *      the <feature-flags> Shell it imports.
  *   3. Hosts a FlagsCore over WebSocket at `/ws` — one
  *      `FlagsCore` + `InMemoryFlagProvider` + `RemoteShellProxy` per connection.
  *
@@ -21,9 +23,9 @@
  *
  * NOTE: imports come from `../../dist/server/index.js` (the BUILT package), so
  * the repo must be built first (`npm run build` at the repo root). The
- * `/_pkg/` mount serves that same `dist/`, so the build is a prerequisite for
- * serving regardless — see examples/CONVENTIONS.md §3. Always use the `/server`
- * subpath on Node: the root entry pulls in `HTMLElement` and would throw.
+ * `/_pkg/dist/` mount serves that same `dist/`, so the build is a prerequisite
+ * for serving regardless — see examples/CONVENTIONS.md §3. Always use the
+ * `/server` subpath on Node: the root entry pulls in `HTMLElement` and throws.
  */
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { readFile } from "node:fs/promises";
@@ -63,7 +65,8 @@ const MIME_TYPES: Record<string, string> = {
 
 /** Resolve a request pathname to an absolute file inside one of the mounts. */
 function resolveFile(mounts: Mount[], pathname: string): { mount: Mount; file: string } | null {
-  // Longest matching prefix wins (so `/_pkg/server/...` is not shadowed).
+  // Longest matching prefix wins (so `/_pkg/src/auto/...` is not shadowed by a
+  // shorter overlapping mount).
   const mount = mounts
     .filter((m) => pathname.startsWith(m.prefix))
     .sort((a, b) => b.prefix.length - a.prefix.length)[0];

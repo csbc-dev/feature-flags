@@ -7,7 +7,7 @@
  * `auth0-session:ready-changed` when readiness flips — that whole contract,
  * without Auth0.
  *
- * Shared by the Shell-bound examples (vanilla bundles this via Vite; the
+ * Shared by every example (react / vue / vanilla bundle this via Vite; the
  * buildless wcstack-state example loads it over the demo server's /_shared/
  * mount). It is plain ESM JS so both consumption styles work; the bare
  * `@wc-bindable/remote` import resolves from node_modules (Vite) or the page's

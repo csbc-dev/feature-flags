@@ -24,8 +24,13 @@ const mounts: Mount[] = [
   { prefix: "/vanilla/", root: resolve(examplesRoot, "vanilla/dist") },
   // wcstack-state is buildless — served raw (its index.html + shared modules).
   { prefix: "/wcstack-state/", root: resolve(examplesRoot, "wcstack-state") },
-  // The built package, imported by the wcstack-state example's Shell.
-  { prefix: "/_pkg/", root: resolve(repoRoot, "dist") },
+  // The built package, mirrored at its PUBLISHED layout so the wcstack-state
+  // example loads the very files npm ships: the `/auto` entry (`src/auto/`) and
+  // the compiled Shell it imports (`dist/`). Two narrow mounts — rather than one
+  // bare `/_pkg/` → repo root — so `auto.min.js`'s `../../dist/index.js`
+  // resolves to `/_pkg/dist/index.js` without serving node_modules / .git.
+  { prefix: "/_pkg/dist/", root: resolve(repoRoot, "dist") },
+  { prefix: "/_pkg/src/auto/", root: resolve(repoRoot, "src/auto") },
   // Shared browser modules (the <demo-session> transport), loaded buildless by
   // the wcstack-state example; the vanilla example bundles the same source.
   { prefix: "/_shared/", root: resolve(examplesRoot, "shared") },

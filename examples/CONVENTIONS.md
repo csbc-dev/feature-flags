@@ -47,13 +47,14 @@ Do not add a fifth framework folder without updating this document first.
 ## 2. One shared server. No per-example dev server for serving.
 
 There is **one** server for all four examples: `examples/server/`. It is the only
-thing that is ever started to *serve* the examples. It does three jobs:
+thing that is ever started to *serve* the examples. It does two jobs:
 
-1. **Static file serving** for each example's compiled output, under a path prefix:
-   `/react/`, `/vue/`, `/vanilla/`, `/wcstack-state/`.
-2. **Serves the built package** at `/_pkg/` (→ the repo's `dist/`) so the buildless
-   `wcstack-state` example can `import` the real `<feature-flags>` Shell.
-3. **Hosts the Core over WebSocket** at `/ws` — a per-connection
+1. **Static file serving** for each example's compiled output, under a path prefix
+   (`/react/`, `/vue/`, `/vanilla/`, `/wcstack-state/`), plus the shared
+   `<demo-session>` transport at `/_shared/`. The buildless `wcstack-state`
+   example loads the published `<feature-flags>` Shell from the esm.run CDN, so
+   the server does **not** serve the package itself (see §7.4).
+2. **Hosts the Core over WebSocket** at `/ws` — a per-connection
    `FlagsCore` + `InMemoryFlagProvider` + `RemoteShellProxy`.
 
 Everything is **same-origin on one port**, so clients never hard-code a host or
@@ -62,8 +63,8 @@ port — see §5.
 > **Why not Vite's dev server?** Each framework example may *use* Vite (or `tsc`)
 > as a **build tool**, but Vite's dev server is not how examples are served. A
 > single static server keeps all four examples on one origin, lets them share the
-> `/ws` Core and the `/_pkg/` build, and matches how the package is actually
-> consumed in production (a CDN/static host + a separate WebSocket backend). The
+> `/ws` Core, and matches how the package is actually consumed in production
+> (a CDN/static host + a separate WebSocket backend). The
 > per-example `dev` script (Vite HMR) may exist for authoring convenience, but it
 > must proxy `/ws` to the shared server and is never the documented run path.
 
@@ -77,7 +78,7 @@ output**:
 
 | Target | Compile step | Output served from |
 |---|---|---|
-| root package | `tsc` (`npm run build` at repo root) | `dist/` → mounted at `/_pkg/` |
+| root package | `tsc` (`npm run build` at repo root) | `dist/server/` → imported by the demo server (the Core); browsers get the Shell from the esm.run CDN |
 | react | `tsc --noEmit && vite build` | `examples/react/dist/` |
 | vue | `vue-tsc --noEmit && vite build` | `examples/vue/dist/` |
 | vanilla | `vite build` (esbuild type-strips; the Shell is bundled from `src`, whose full typecheck is the package's own `tsc`) | `examples/vanilla/dist/` |
@@ -98,7 +99,7 @@ examples/
 ├── CONVENTIONS.md          # this file
 ├── README.md               # quick start, points here
 ├── package.json            # orchestrator: build-all + start
-├── server/                 # the one shared server (static + /_pkg/ + /ws Core)
+├── server/                 # the one shared server (static + /_shared/ + /ws Core)
 │   ├── server.ts
 │   ├── package.json
 │   └── tsconfig.json
@@ -225,29 +226,24 @@ This example is held to `@wcstack/state`'s own five rules. It MUST be:
    {…}</script></wcs-state>`. Update by **path assignment** (`this["a.b"] = …`),
    never `this.a.b = …`.
 4. **No inline JavaScript — both elements register via side-effect `/auto`
-   scripts** served by the demo server:
-   - `<feature-flags>` from the built package's `/auto` entry,
-     `<script type="module" src="/_pkg/src/auto/auto.min.js">` — the exact file
-     npm ships for the `@csbc-dev/feature-flags/auto` export (equivalent to
-     `import "@csbc-dev/feature-flags/auto"`). It is served at the package's
-     published layout under `/_pkg/` (`/auto` at `/_pkg/src/auto/`, the compiled
-     Shell at `/_pkg/dist/`) and its modules import each other relatively, so
-     **no** bare `@csbc-dev/feature-flags` import map entry is needed.
+   scripts**:
+   - `<feature-flags>` from the published package's `/auto` entry on the **esm.run
+     CDN**, `<script type="module" src="https://esm.run/@csbc-dev/feature-flags/auto">`
+     (equivalent to `import "@csbc-dev/feature-flags/auto"`). This matches the
+     `@csbc-dev/auth0` and `@csbc-dev/ai-agent` wcstack-state examples. esm.run
+     resolves the package's own `@wc-bindable/*` dependencies, so **no** bare
+     `@csbc-dev/feature-flags` import map entry is needed.
+   - `<demo-session>` from `<script type="module" src="/_shared/demo-session/auto.js">`,
+     served locally by the demo server.
 
-     > **Post-publish TODO.** This local `/_pkg/` serving is a stopgap because
-     > `@csbc-dev/feature-flags` is **not yet published to npm**. The sibling
-     > packages (`@csbc-dev/auth0`, `@csbc-dev/ai-agent`) load their Shell from
-     > the CDN — `<script type="module" src="https://esm.run/@csbc-dev/<pkg>/auto">`.
-     > Once this package is published, switch the script above to
-     > `https://esm.run/@csbc-dev/feature-flags/auto` and drop the `/_pkg/`
-     > mounts in `server/server.ts` to match the family convention.
-   - `<demo-session>` from `<script type="module" src="/_shared/demo-session/auto.js">`.
-
-   The `importmap` therefore only maps the bare `@wc-bindable/core` /
-   `@wc-bindable/remote` specifiers reached from the served Shell (`bind()`) and
-   transport (`RemoteCoreProxy`) → pinned esm.run URLs that **match the version
-   the package was built against** (currently `0.4.0`), so the served Shell and
-   the transport share one module instance.
+   The `importmap` therefore only maps the bare `@wc-bindable/remote` (and the
+   `@wc-bindable/core` it pulls in) specifier reached by the **local**
+   `<demo-session>` module → pinned esm.run URLs that **match the version the
+   published package depends on** (`@wc-bindable/*` `^0.4.0` → `0.4.0`), so the
+   local transport and the CDN Shell agree on the wire/protocol version. The CDN
+   Shell may resolve a separate module instance of `@wc-bindable/*`; that is fine
+   — the Shell binds the proxy through the version-stable wc-bindable v1 protocol
+   (data + DOM events), not by shared module identity.
 5. **Bindings follow the current `@wcstack/state` spec**, not guesses:
    - Element output properties → state paths:
      `data-wcs="flags: currentFlags; identified: flagsReady; loading: flagsLoading; error: flagsError"`.
@@ -271,8 +267,8 @@ This example is held to `@wcstack/state`'s own five rules. It MUST be:
      v1.9.1). `FlagsCore.wcBindable` already uses the object form.
 6. **Ordering**: the `/auto` scripts that register `<demo-session>`
    (`/_shared/demo-session/auto.js`) and `<feature-flags>`
-   (`/_pkg/src/auto/auto.min.js`) must run **before** the `@wcstack/state/auto`
-   script in document order.
+   (`https://esm.run/@csbc-dev/feature-flags/auto`) must run **before** the
+   `@wcstack/state/auto` script in document order.
    Module scripts execute in order, so by the time
    `<wcs-state>` scans `data-wcs` both elements are upgraded and their
    `static wcBindable` is readable.

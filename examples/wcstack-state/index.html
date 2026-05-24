@@ -6,15 +6,15 @@
     <title>feature-flags · @wcstack/state</title>
 
     <!--
-      Import map. The built package is served under /_pkg/ at its published
-      layout (its /auto entry at /_pkg/src/auto/, the compiled Shell at
-      /_pkg/dist/) and its modules import each other RELATIVELY, so no bare
-      @csbc-dev/feature-flags mapping is needed. What DOES need mapping are the
-      bare @wc-bindable/* specifiers reached from the served Shell (`bind()` from
-      /core) and the shared <demo-session> (the RemoteCoreProxy from /remote).
-      They are pinned to the version the package was built against (0.4.0) so the
-      served Shell and the transport share ONE module instance. Bump these
-      together with the package's dependency when it changes.
+      Import map. The <feature-flags> Shell is loaded from the esm.run CDN
+      (see the script tag below), and esm.run resolves the package's own
+      @wc-bindable/* dependencies internally — so the Shell needs NO entries
+      here. What DOES need mapping is the bare @wc-bindable/remote specifier
+      reached by the LOCAL <demo-session> module (the RemoteCoreProxy it builds),
+      plus @wc-bindable/core which remote pulls in. They are pinned to 0.4.0 —
+      the version the published package depends on (@wc-bindable/* ^0.4.0) — so
+      the local transport and the CDN Shell agree on the wire/protocol version.
+      Bump these together with the package's dependency when it changes.
     -->
     <script type="importmap">
       {
@@ -55,25 +55,18 @@
           `data-wcs`, both elements are upgraded and their `static wcBindable`
           (which the property + command bindings read) is available.
 
-          Both load as side-effect /auto modules served by the demo server, so
-          this example contains NO inline JavaScript — its only code is the
-          declarative state + bindings below:
-            - <demo-session> from /_shared/demo-session (the SAME module the
-              vanilla example bundles).
-            - <feature-flags> from the built package's /auto entry,
-              /_pkg/src/auto/auto.min.js (the exact file npm ships for the
-              "@csbc-dev/feature-flags/auto" export).
-
-          TODO (after publishing @csbc-dev/feature-flags to npm): switch the
-          <feature-flags> script below to the CDN package specifier, matching the
-          @csbc-dev/auth0 and @csbc-dev/ai-agent wcstack-state examples —
-            <script type="module" src="https://esm.run/@csbc-dev/feature-flags/auto"></script>
-          and drop the local /_pkg/ mounts in examples/server/server.ts (kept
-          only because the package is unpublished and must be served from the
-          working-tree build for now).
+          Both load as side-effect /auto modules, so this example contains NO
+          inline JavaScript — its only code is the declarative state + bindings
+          below:
+            - <demo-session> from /_shared/demo-session, served locally by the
+              demo server (the SAME module the vanilla example bundles).
+            - <feature-flags> from the published package's /auto entry on the
+              esm.run CDN — matching the @csbc-dev/auth0 and @csbc-dev/ai-agent
+              wcstack-state examples. (Equivalent to
+              `import "@csbc-dev/feature-flags/auto"`.)
     -->
     <script type="module" src="/_shared/demo-session/auto.js"></script>
-    <script type="module" src="/_pkg/src/auto/auto.min.js"></script>
+    <script type="module" src="https://esm.run/@csbc-dev/feature-flags/auto"></script>
 
     <!--
       (2) @wcstack/state runtime — a single, pinned, self-registering CDN import.

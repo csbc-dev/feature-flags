@@ -1,9 +1,11 @@
 /**
  * Entry point for the one shared example server.
  *
- * Mounts each example's compiled output (plus the built package at `/_pkg/`),
- * serves a landing page at `/`, and hosts FlagsCore over `/ws`. See
- * examples/CONVENTIONS.md §2 for the contract this implements.
+ * Mounts each example's compiled output, serves a landing page at `/`, and
+ * hosts FlagsCore over `/ws`. See examples/CONVENTIONS.md §2 for the contract
+ * this implements. (The wcstack-state example loads the published
+ * `<feature-flags>` Shell from the esm.run CDN, so the server no longer serves
+ * the package itself.)
  *
  * Run:  npm install && npm start   (from examples/)  — builds first, then serves
  *       npm run dev                (from examples/server) — serve without rebuild
@@ -14,7 +16,6 @@ import { createFlagsDemoServer, type Mount } from "../shared/flagsDemoServer.js"
 
 const here = dirname(fileURLToPath(import.meta.url));
 const examplesRoot = resolve(here, "..");
-const repoRoot = resolve(here, "../..");
 
 const PORT = Number(process.env.PORT ?? 8080);
 
@@ -23,23 +24,18 @@ const mounts: Mount[] = [
   { prefix: "/vue/", root: resolve(examplesRoot, "vue/dist") },
   { prefix: "/vanilla/", root: resolve(examplesRoot, "vanilla/dist") },
   // wcstack-state is buildless — served raw (its index.html + shared modules).
+  // It loads the <feature-flags> Shell from the esm.run CDN, so there is no
+  // package mount here (see examples/CONVENTIONS.md §7.4).
   { prefix: "/wcstack-state/", root: resolve(examplesRoot, "wcstack-state") },
-  // The built package, mirrored at its PUBLISHED layout so the wcstack-state
-  // example loads the very files npm ships: the `/auto` entry (`src/auto/`) and
-  // the compiled Shell it imports (`dist/`). Two narrow mounts — rather than one
-  // bare `/_pkg/` → repo root — so `auto.min.js`'s `../../dist/index.js`
-  // resolves to `/_pkg/dist/index.js` without serving node_modules / .git.
-  { prefix: "/_pkg/dist/", root: resolve(repoRoot, "dist") },
-  { prefix: "/_pkg/src/auto/", root: resolve(repoRoot, "src/auto") },
   // Shared browser modules (the <demo-session> transport), loaded buildless by
   // the wcstack-state example; the vanilla example bundles the same source.
   { prefix: "/_shared/", root: resolve(examplesRoot, "shared") },
 ];
 
 const EXAMPLES = [
-  { path: "/react/", title: "React", blurb: "RemoteCoreProxy bound into React state (useFeatureFlags hook)." },
-  { path: "/vue/", title: "Vue", blurb: "RemoteCoreProxy bound into reactive refs (useFeatureFlags composable)." },
-  { path: "/vanilla/", title: "Vanilla", blurb: "The <feature-flags> Shell element + bind(), no framework." },
+  { path: "/react/", title: "React", blurb: "The <feature-flags> Shell bound with useWcBindable (@wc-bindable/react)." },
+  { path: "/vue/", title: "Vue", blurb: "The <feature-flags> Shell bound with useWcBindable (@wc-bindable/vue)." },
+  { path: "/vanilla/", title: "Vanilla", blurb: "The <feature-flags> Shell element + raw bind(), no framework." },
   { path: "/wcstack-state/", title: "@wcstack/state", blurb: "Declarative data-wcs binding, zero per-flag JS." },
 ];
 

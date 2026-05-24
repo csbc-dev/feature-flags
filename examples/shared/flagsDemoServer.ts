@@ -4,12 +4,11 @@
  * ONE server does everything the four browser examples need:
  *
  *   1. Static file serving for each example's compiled output, under a path
- *      prefix (`/react/`, `/vue/`, `/vanilla/`, `/wcstack-state/`).
- *   2. Serves the built package under `/_pkg/` at its published layout
- *      (`/_pkg/src/auto/` → repo `src/auto/`, `/_pkg/dist/` → repo `dist/`) so
- *      the buildless wcstack-state example can load the real `/auto` entry and
- *      the <feature-flags> Shell it imports.
- *   3. Hosts a FlagsCore over WebSocket at `/ws` — one
+ *      prefix (`/react/`, `/vue/`, `/vanilla/`, `/wcstack-state/`), plus the
+ *      shared `<demo-session>` transport at `/_shared/`. (The buildless
+ *      wcstack-state example loads the published `<feature-flags>` Shell from
+ *      the esm.run CDN, so the server does not serve the package itself.)
+ *   2. Hosts a FlagsCore over WebSocket at `/ws` — one
  *      `FlagsCore` + `InMemoryFlagProvider` + `RemoteShellProxy` per connection.
  *
  * Everything is same-origin on one port, so the browser examples derive the
@@ -22,10 +21,9 @@
  * speaks the exact same wire protocol the production stack uses.
  *
  * NOTE: imports come from `../../dist/server/index.js` (the BUILT package), so
- * the repo must be built first (`npm run build` at the repo root). The
- * `/_pkg/dist/` mount serves that same `dist/`, so the build is a prerequisite
- * for serving regardless — see examples/CONVENTIONS.md §3. Always use the
- * `/server` subpath on Node: the root entry pulls in `HTMLElement` and throws.
+ * the repo must be built first (`npm run build` at the repo root) — the server
+ * itself runs the server-side Core. Always use the `/server` subpath on Node:
+ * the root entry pulls in `HTMLElement` and throws.
  */
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { readFile } from "node:fs/promises";
@@ -65,8 +63,9 @@ const MIME_TYPES: Record<string, string> = {
 
 /** Resolve a request pathname to an absolute file inside one of the mounts. */
 function resolveFile(mounts: Mount[], pathname: string): { mount: Mount; file: string } | null {
-  // Longest matching prefix wins (so `/_pkg/src/auto/...` is not shadowed by a
-  // shorter overlapping mount).
+  // Longest matching prefix wins, so a more specific mount is never shadowed by
+  // a shorter overlapping one (the current mounts don't overlap, but this keeps
+  // resolution well-defined if one is ever added).
   const mount = mounts
     .filter((m) => pathname.startsWith(m.prefix))
     .sort((a, b) => b.prefix.length - a.prefix.length)[0];

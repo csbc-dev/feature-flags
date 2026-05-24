@@ -29,14 +29,16 @@ decision runs server-side in `FlagsCore`; the browser only *observes* the result
 │        └─ RemoteShellProxy     │◄──────────►│        ├─ useWcBindable (R/Vue)  │
 ├───────────────────────────────┤            │        ├─ raw bind()   (vanilla) │
 │ static files: /react /vue …    │  (HTTP)    │        └─ data-wcs   (wcstack)   │
-│ built package:  /_pkg/         │───────────►│                                  │
+│   + /_shared/ (demo-session)   │───────────►│                                  │
 └───────────────────────────────┘            └─────────────────────────────────┘
+   (wcstack-state loads the <feature-flags> Shell from the esm.run CDN)
 ```
 
-One Node process ([`server/`](./server)) serves every example's compiled output,
-serves the built package at `/_pkg/`, and hosts a per-connection
-`FlagsCore` + `InMemoryFlagProvider` + `RemoteShellProxy` at `/ws`. No Auth0, no
-SaaS account, nothing to sign up for — but the browser speaks the exact same wire
+One Node process ([`server/`](./server)) serves every example's compiled output
+(plus the shared `<demo-session>` at `/_shared/`) and hosts a per-connection
+`FlagsCore` + `InMemoryFlagProvider` + `RemoteShellProxy` at `/ws`. The buildless
+wcstack-state example loads the published `<feature-flags>` Shell from the esm.run
+CDN. No Auth0, no SaaS account, nothing to sign up for — but the browser speaks the exact same wire
 protocol the production stack uses.
 
 All four examples drive the real `<feature-flags>` Shell — the package's primary
@@ -95,10 +97,12 @@ rules change the flag map, and **reload()** to force a fresh snapshot. The
   `../../shared/demo-session`; Vite bundles both.
 - **wcstack-state** is buildless and has **no inline JavaScript**: its own state
   + `data-wcs` bindings live in one `index.html`. It registers `<feature-flags>`
-  via the **built** package's `/auto` entry (`/_pkg/src/auto/auto.min.js`) and the shared
-  `<demo-session>` via `/_shared/demo-session/auto.js` — both side-effect
-  `<script src>` modules served by the shared server — plus `@wcstack/state` from
-  a pinned CDN URL. The `<demo-session>` source is the *same* module vanilla
+  via the **published** package's `/auto` entry on the esm.run CDN
+  (`https://esm.run/@csbc-dev/feature-flags/auto`, like the `@csbc-dev/auth0` /
+  `@csbc-dev/ai-agent` examples) and the shared `<demo-session>` via
+  `/_shared/demo-session/auto.js` served by the shared server — both side-effect
+  `<script src>` modules — plus `@wcstack/state` from a pinned CDN URL. The
+  `<demo-session>` source is the *same* module vanilla
   bundles. See its `index.html` and CONVENTIONS.md §7.4.
 
 ---

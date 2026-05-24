@@ -63,6 +63,14 @@
             - <feature-flags> from the built package's /auto entry,
               /_pkg/src/auto/auto.min.js (the exact file npm ships for the
               "@csbc-dev/feature-flags/auto" export).
+
+          TODO (after publishing @csbc-dev/feature-flags to npm): switch the
+          <feature-flags> script below to the CDN package specifier, matching the
+          @csbc-dev/auth0 and @csbc-dev/ai-agent wcstack-state examples —
+            <script type="module" src="https://esm.run/@csbc-dev/feature-flags/auto"></script>
+          and drop the local /_pkg/ mounts in examples/server/server.ts (kept
+          only because the package is unpublished and must be served from the
+          working-tree build for now).
     -->
     <script type="module" src="/_shared/demo-session/auto.js"></script>
     <script type="module" src="/_pkg/src/auto/auto.min.js"></script>

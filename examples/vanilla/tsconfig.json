@@ -10,7 +10,11 @@
     "esModuleInterop": true,
     "skipLibCheck": true,
     "isolatedModules": true,
-    "baseUrl": ".",
+    // Resolve `@csbc-dev/feature-flags` to the package SOURCE, mirroring the
+    // Vite alias in vite.config.ts so the editor/TS language server resolves
+    // the import the same way the bundle does (vanilla's build is `vite build`
+    // only — no `tsc` step). `paths` resolve relative to this tsconfig (no
+    // `baseUrl` — it is deprecated in TS 7.0).
     "paths": {
       "@csbc-dev/feature-flags": ["../../src/index.ts"],
       "@csbc-dev/feature-flags/server": ["../../src/server/index.ts"]

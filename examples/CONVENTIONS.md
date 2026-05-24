@@ -233,6 +233,14 @@ This example is held to `@wcstack/state`'s own five rules. It MUST be:
      published layout under `/_pkg/` (`/auto` at `/_pkg/src/auto/`, the compiled
      Shell at `/_pkg/dist/`) and its modules import each other relatively, so
      **no** bare `@csbc-dev/feature-flags` import map entry is needed.
+
+     > **Post-publish TODO.** This local `/_pkg/` serving is a stopgap because
+     > `@csbc-dev/feature-flags` is **not yet published to npm**. The sibling
+     > packages (`@csbc-dev/auth0`, `@csbc-dev/ai-agent`) load their Shell from
+     > the CDN — `<script type="module" src="https://esm.run/@csbc-dev/<pkg>/auto">`.
+     > Once this package is published, switch the script above to
+     > `https://esm.run/@csbc-dev/feature-flags/auto` and drop the `/_pkg/`
+     > mounts in `server/server.ts` to match the family convention.
    - `<demo-session>` from `<script type="module" src="/_shared/demo-session/auto.js">`.
 
    The `importmap` therefore only maps the bare `@wc-bindable/core` /

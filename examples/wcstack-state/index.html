@@ -6,20 +6,18 @@
     <title>feature-flags · @wcstack/state</title>
 
     <!--
-      Import map. Resolves the bare specifiers used by the inline module below
-      AND by the served Shell:
-        - @csbc-dev/feature-flags → the BUILT package, served at /_pkg/ by the
-          shared server (this example is buildless, so it consumes the compiled
-          Shell rather than the TS source).
-        - @wc-bindable/* → pinned to the version the package was built against
-          (0.4.0) so the served Shell's `bind()` and <demo-session>'s proxy
-          share ONE module instance. Bump these together with the package's
-          dependency when it changes.
+      Import map. The built package (the Shell + its /auto entry) is served at
+      /_pkg/ and its modules import each other RELATIVELY, so no bare
+      @csbc-dev/feature-flags mapping is needed. What DOES need mapping are the
+      bare @wc-bindable/* specifiers reached from the served Shell (`bind()` from
+      /core) and the shared <demo-session> (the RemoteCoreProxy from /remote).
+      They are pinned to the version the package was built against (0.4.0) so the
+      served Shell and the transport share ONE module instance. Bump these
+      together with the package's dependency when it changes.
     -->
     <script type="importmap">
       {
         "imports": {
-          "@csbc-dev/feature-flags": "/_pkg/index.js",
           "@wc-bindable/core": "https://esm.run/@wc-bindable/core@0.4.0",
           "@wc-bindable/remote": "https://esm.run/@wc-bindable/remote@0.4.0"
         }
@@ -50,25 +48,22 @@
     </style>
 
     <!--
-      (1) Register <demo-session> (the shared demo transport) and <feature-flags>
-          BEFORE the @wcstack/state runtime scans the DOM. Module scripts run in
-          document order, and customElements.define() upgrades already-parsed
-          elements synchronously, so by the time <wcs-state> (registered by the
-          /auto script below) scans `data-wcs`, both elements are upgraded and
-          their `static wcBindable` (which the property + command bindings read)
-          is available.
+      (1) Register <demo-session> and <feature-flags> BEFORE the @wcstack/state
+          runtime scans the DOM. Module scripts run in document order, so by the
+          time <wcs-state> (registered by the /auto script below) scans
+          `data-wcs`, both elements are upgraded and their `static wcBindable`
+          (which the property + command bindings read) is available.
 
-          The <demo-session> transport is the SAME module the vanilla example
-          bundles — examples/shared/demo-session — served here at /_shared/ by
-          the demo server; its `auto.js` defines the element as a side effect.
-          (This relaxes "single file" by one shared, reused module; the example's
-          own state + data-wcs bindings still live entirely in this file.)
+          Both load as side-effect /auto modules served by the demo server, so
+          this example contains NO inline JavaScript — its only code is the
+          declarative state + bindings below:
+            - <demo-session> from /_shared/demo-session (the SAME module the
+              vanilla example bundles).
+            - <feature-flags> from the built package's /auto entry, /_pkg/auto.js
+              (equivalent to importing @csbc-dev/feature-flags/auto).
     -->
     <script type="module" src="/_shared/demo-session/auto.js"></script>
-    <script type="module">
-      import { bootstrapFlags } from "@csbc-dev/feature-flags";
-      bootstrapFlags();
-    </script>
+    <script type="module" src="/_pkg/auto.js"></script>
 
     <!--
       (2) @wcstack/state runtime — a single, pinned, self-registering CDN import.

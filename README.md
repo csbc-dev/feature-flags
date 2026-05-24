@@ -137,6 +137,8 @@ bootstrapFlags();
 
 > The client-side `registerCoreDeclaration` call imports only the **declaration** (`FlagsCore.wcBindable`), not the Core's runtime — it is safe to import `FlagsCore` from the `/server` subpath in a browser bundle as long as your bundler tree-shakes the provider dependency. If that is a concern, copy the declaration into a shared `shared/flagsDecl.ts` and import it from both sides.
 
+> **`/auto` shortcut.** To register `<feature-flags>` with no call, load the side-effect entry — `import "@csbc-dev/feature-flags/auto"`, or `<script type="module" src="https://esm.run/@csbc-dev/feature-flags/auto"></script>`. It is exactly `bootstrapFlags()` with defaults; use `bootstrapFlags(config)` from the root entry when you need custom tag names.
+
 ## Identity
 
 `FlagsCore` derives the flag-service identity from the Auth0 `UserContext` passed to its constructor:

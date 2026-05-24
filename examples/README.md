@@ -83,12 +83,13 @@ rules change the flag map, and **reload()** to force a fresh snapshot. The
 - **vanilla** imports the `<feature-flags>` Shell from the package **source** via
   a Vite alias to `../../src`, and the shared `<demo-session>` transport from
   `../../shared/demo-session`; Vite bundles both.
-- **wcstack-state** is buildless: its own state + `data-wcs` bindings live in one
-  `index.html`. It imports the **built** Shell from `/_pkg/index.js` and loads
-  the shared `<demo-session>` from `/_shared/demo-session/auto.js` (both served
-  by the shared server) through an import map, plus `@wcstack/state` from a pinned
-  CDN URL. The `<demo-session>` source is the *same* module vanilla bundles. See
-  its `index.html` and CONVENTIONS.md §7.4.
+- **wcstack-state** is buildless and has **no inline JavaScript**: its own state
+  + `data-wcs` bindings live in one `index.html`. It registers `<feature-flags>`
+  via the **built** package's `/auto` entry (`/_pkg/auto.js`) and the shared
+  `<demo-session>` via `/_shared/demo-session/auto.js` — both side-effect
+  `<script src>` modules served by the shared server — plus `@wcstack/state` from
+  a pinned CDN URL. The `<demo-session>` source is the *same* module vanilla
+  bundles. See its `index.html` and CONVENTIONS.md §7.4.
 
 ---
 

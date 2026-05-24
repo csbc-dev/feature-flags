@@ -207,14 +207,20 @@ This example is held to `@wcstack/state`'s own five rules. It MUST be:
 3. **State declared inline** in `<wcs-state><script type="module">export default
    {…}</script></wcs-state>`. Update by **path assignment** (`this["a.b"] = …`),
    never `this.a.b = …`.
-4. **The Shell and transport come over the shared server**: an `importmap` maps
-   `@csbc-dev/feature-flags` → `/_pkg/index.js` (the built package), and
-   `@wc-bindable/core` / `@wc-bindable/remote` → pinned esm.run URLs that **match
-   the version the package was built against** (currently `0.4.0`). The shared
-   `<demo-session>` is loaded with
-   `<script type="module" src="/_shared/demo-session/auto.js">`; its
-   `@wc-bindable/remote` import resolves through the same import map, so the
-   served Shell and the transport share one module instance.
+4. **No inline JavaScript — both elements register via side-effect `/auto`
+   scripts** served by the demo server:
+   - `<feature-flags>` from the built package's `/auto` entry,
+     `<script type="module" src="/_pkg/auto.js">` (equivalent to
+     `import "@csbc-dev/feature-flags/auto"`). Its modules import each other
+     relatively under `/_pkg/`, so **no** bare `@csbc-dev/feature-flags` import
+     map entry is needed.
+   - `<demo-session>` from `<script type="module" src="/_shared/demo-session/auto.js">`.
+
+   The `importmap` therefore only maps the bare `@wc-bindable/core` /
+   `@wc-bindable/remote` specifiers reached from the served Shell (`bind()`) and
+   transport (`RemoteCoreProxy`) → pinned esm.run URLs that **match the version
+   the package was built against** (currently `0.4.0`), so the served Shell and
+   the transport share one module instance.
 5. **Bindings follow the current `@wcstack/state` spec**, not guesses:
    - Element output properties → state paths:
      `data-wcs="flags: currentFlags; identified: flagsReady; loading: flagsLoading; error: flagsError"`.
@@ -236,10 +242,10 @@ This example is held to `@wcstack/state`'s own five rules. It MUST be:
      This requires the element's `wcBindable.commands` to be the object form
      `[{ name, async? }]` (the string form was removed in `@wcstack/state`
      v1.9.1). `FlagsCore.wcBindable` already uses the object form.
-6. **Ordering**: the scripts that register `<demo-session>` (the
-   `/_shared/demo-session/auto.js` module) and `<feature-flags>` (the inline
-   `bootstrapFlags()` module) must run **before** the `@wcstack/state/auto`
-   script in document order. Module scripts execute in order, so by the time
+6. **Ordering**: the `/auto` scripts that register `<demo-session>`
+   (`/_shared/demo-session/auto.js`) and `<feature-flags>` (`/_pkg/auto.js`)
+   must run **before** the `@wcstack/state/auto` script in document order.
+   Module scripts execute in order, so by the time
    `<wcs-state>` scans `data-wcs` both elements are upgraded and their
    `static wcBindable` is readable.
 

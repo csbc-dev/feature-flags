@@ -5,8 +5,9 @@
   "type": "module",
   "description": "Shared example server for @csbc-dev/feature-flags: static file serving for every example + FlagsCore over WebSocket (InMemoryFlagProvider + RemoteShellProxy).",
   "scripts": {
-    "dev": "tsx watch server.ts",
-    "start": "tsx server.ts"
+    "dev": "npm run build:shared && tsx watch server.ts",
+    "start": "npm run build:shared && tsx server.ts",
+    "build:shared": "esbuild ../shared/demo-session/auto.js --bundle --format=esm --outfile=../shared/demo-session/auto.bundle.js"
   },
   "dependencies": {
     "@wc-bindable/remote": "^0.4.0",
@@ -15,6 +16,7 @@
   "devDependencies": {
     "@types/node": "^22.10.0",
     "@types/ws": "^8.18.1",
+    "esbuild": "^0.28.0",
     "tsx": "^4.19.2"
   }
 }

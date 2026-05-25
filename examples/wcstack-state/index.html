@@ -6,24 +6,20 @@
     <title>feature-flags · @wcstack/state</title>
 
     <!--
-      Import map. The <feature-flags> Shell is loaded from the esm.run CDN
-      (see the script tag below), and esm.run resolves the package's own
-      @wc-bindable/* dependencies internally — so the Shell needs NO entries
-      here. What DOES need mapping is the bare @wc-bindable/remote specifier
-      reached by the LOCAL <demo-session> module (the RemoteCoreProxy it builds),
-      plus @wc-bindable/core which remote pulls in. They are pinned to 0.4.0 —
-      the version the published package depends on (@wc-bindable/* ^0.4.0) — so
-      the local transport and the CDN Shell agree on the wire/protocol version.
-      Bump these together with the package's dependency when it changes.
+      No import map. Both modules resolve all their dependencies on their own:
+        - The <feature-flags> Shell is loaded from the esm.run CDN (below), and
+          esm.run resolves the package's own @wc-bindable/* dependencies
+          internally.
+        - The LOCAL <demo-session> module is loaded as a PRE-BUNDLED file
+          (auto.bundle.js — esbuild inlines @wc-bindable/remote + core), so it
+          carries no bare specifiers either.
+      The bundled @wc-bindable/* is pinned by the version the published package
+      depends on (@wc-bindable/* ^0.4.0), so the local transport and the CDN
+      Shell agree on the wire/protocol version. The CDN Shell may resolve its
+      own separate module instance; that is fine — the Shell binds the proxy
+      through the version-stable wc-bindable v1 protocol (data + DOM events),
+      not by shared module identity.
     -->
-    <script type="importmap">
-      {
-        "imports": {
-          "@wc-bindable/core": "https://esm.run/@wc-bindable/core@0.4.0",
-          "@wc-bindable/remote": "https://esm.run/@wc-bindable/remote@0.4.0"
-        }
-      }
-    </script>
 
     <style>
       :root {
@@ -58,14 +54,17 @@
           Both load as side-effect /auto modules, so this example contains NO
           inline JavaScript — its only code is the declarative state + bindings
           below:
-            - <demo-session> from /_shared/demo-session, served locally by the
-              demo server (the SAME module the vanilla example bundles).
+            - <demo-session> from /_shared/demo-session/auto.bundle.js, served
+              locally by the demo server. This is the esbuild PRE-BUNDLE of the
+              SAME source module the vanilla example bundles (auto.js), with its
+              @wc-bindable/* dependencies inlined — which is what lets this page
+              drop the import map. Built by `npm run build:shared`.
             - <feature-flags> from the published package's /auto entry on the
               esm.run CDN — matching the @csbc-dev/auth0 and @csbc-dev/ai-agent
               wcstack-state examples. (Equivalent to
               `import "@csbc-dev/feature-flags/auto"`.)
     -->
-    <script type="module" src="/_shared/demo-session/auto.js"></script>
+    <script type="module" src="/_shared/demo-session/auto.bundle.js"></script>
     <script type="module" src="https://esm.run/@csbc-dev/feature-flags/auto"></script>
 
     <!--

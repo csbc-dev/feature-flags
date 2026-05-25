@@ -82,7 +82,8 @@ output**:
 | react | `tsc --noEmit && vite build` | `examples/react/dist/` |
 | vue | `vue-tsc --noEmit && vite build` | `examples/vue/dist/` |
 | vanilla | `vite build` (esbuild type-strips; the Shell is bundled from `src`, whose full typecheck is the package's own `tsc`) | `examples/vanilla/dist/` |
-| wcstack-state | *(none — buildless, single file)* | `examples/wcstack-state/` raw |
+| shared `<demo-session>` | `esbuild --bundle` (`npm run build:shared`; `@wc-bindable/*` inlined) | `examples/shared/demo-session/auto.bundle.js` (gitignored) |
+| wcstack-state | *(none for the example itself — single file; loads the pre-bundled shared `<demo-session>`)* | `examples/wcstack-state/` raw |
 | server | runs via `tsx` (type-checked, not bundled) | n/a |
 
 `examples/` has a root `package.json` whose `npm run build` builds the package
@@ -109,7 +110,8 @@ examples/
 │       ├── DemoSession.js  #   Shell-bound examples (class definition)
 │       ├── index.js        #   distribution entry: re-exports + defineDemoSession()
 │       ├── index.d.ts      #   types for the bundled (vanilla) import
-│       └── auto.js         #   side-effect entry: defines <demo-session> on load
+│       ├── auto.js         #   side-effect entry: defines <demo-session> on load
+│       └── auto.bundle.js  #   esbuild pre-bundle of auto.js (@wc-bindable inlined); gitignored, loaded by wcstack-state
 ├── react/                  # vite build → dist/, served at /react/ (Shell + demo-session via useWcBindable)
 ├── vue/                    # vite build → dist/, served at /vue/   (Shell + demo-session via useWcBindable)
 ├── vanilla/                # vite build → dist/, served at /vanilla/  (Shell + demo-session via raw bind())
@@ -208,11 +210,21 @@ are `undefined` for the first frame. Handle it where it bites:
 This example is held to `@wcstack/state`'s own five rules. It MUST be:
 
 1. **One file for the example itself** — the state, `data-wcs` bindings, and CSS
-   all live in `index.html`. No `src/`, no `package.json`, no Vite, no build
-   step. The only thing it pulls in beyond the runtime + Shell is the shared
-   `<demo-session>` transport (the *same* module the vanilla example bundles),
-   loaded over the server's `/_shared/` mount — keeping the binding lesson
-   readable in one file without re-duplicating the reused plumbing.
+   all live in `index.html`. No `src/`, no `package.json`, no Vite, no build step
+   *for the example's own code*. The only thing it pulls in beyond the runtime +
+   Shell is the shared `<demo-session>` transport (the *same* source the vanilla
+   example bundles) — loaded over the server's `/_shared/` mount as a
+   **pre-bundled** self-contained file (`auto.bundle.js`, esbuild, built by
+   `npm run build:shared`, `@wc-bindable/*` inlined) so the page needs no import
+   map. This keeps the binding lesson readable in one file without re-duplicating
+   the reused plumbing. The pre-bundle is a build artifact (gitignored), so the
+   example is served — not opened from disk — which is fine: it is always
+   delivered by the shared demo server. That server runs `build:shared` on every
+   `start` / `dev` (see `server/package.json`), so a server-only restart can
+   never serve a stale or missing bundle even though the wcstack-state example's
+   own code has no build. `npm run smoke` (from `examples/`) is the headless
+   guard: it builds the bundle and asserts the deps are inlined and the page
+   references the bundle with no import map.
 2. **CDN-based for the runtime** — `@wcstack/state` is loaded with its
    self-registering auto entry and **pinned**:
 
@@ -226,24 +238,26 @@ This example is held to `@wcstack/state`'s own five rules. It MUST be:
    {…}</script></wcs-state>`. Update by **path assignment** (`this["a.b"] = …`),
    never `this.a.b = …`.
 4. **No inline JavaScript — both elements register via side-effect `/auto`
-   scripts**:
+   scripts, and the page carries NO `importmap`**:
    - `<feature-flags>` from the published package's `/auto` entry on the **esm.run
      CDN**, `<script type="module" src="https://esm.run/@csbc-dev/feature-flags/auto">`
      (equivalent to `import "@csbc-dev/feature-flags/auto"`). This matches the
      `@csbc-dev/auth0` and `@csbc-dev/ai-agent` wcstack-state examples. esm.run
-     resolves the package's own `@wc-bindable/*` dependencies, so **no** bare
-     `@csbc-dev/feature-flags` import map entry is needed.
-   - `<demo-session>` from `<script type="module" src="/_shared/demo-session/auto.js">`,
-     served locally by the demo server.
+     resolves the package's own `@wc-bindable/*` dependencies internally.
+   - `<demo-session>` from `<script type="module"
+     src="/_shared/demo-session/auto.bundle.js">`, served locally by the demo
+     server. This is the esbuild pre-bundle of the shared `auto.js` source with
+     `@wc-bindable/remote` + `@wc-bindable/core` **inlined**, so it reaches no
+     bare specifiers.
 
-   The `importmap` therefore only maps the bare `@wc-bindable/remote` (and the
-   `@wc-bindable/core` it pulls in) specifier reached by the **local**
-   `<demo-session>` module → pinned esm.run URLs that **match the version the
-   published package depends on** (`@wc-bindable/*` `^0.4.0` → `0.4.0`), so the
-   local transport and the CDN Shell agree on the wire/protocol version. The CDN
-   Shell may resolve a separate module instance of `@wc-bindable/*`; that is fine
-   — the Shell binds the proxy through the version-stable wc-bindable v1 protocol
-   (data + DOM events), not by shared module identity.
+   Because **neither** module reaches a bare specifier, the page needs no
+   `importmap` at all. The bundled `@wc-bindable/*` is the version the published
+   package depends on (`@wc-bindable/*` `^0.4.0` → `0.4.0`, resolved from the
+   repo-root install when `build:shared` runs), so the local transport and the
+   CDN Shell agree on the wire/protocol version. The CDN Shell may resolve a
+   separate module instance of `@wc-bindable/*`; that is fine — the Shell binds
+   the proxy through the version-stable wc-bindable v1 protocol (data + DOM
+   events), not by shared module identity.
 5. **Bindings follow the current `@wcstack/state` spec**, not guesses:
    - Element output properties → state paths:
      `data-wcs="flags: currentFlags; identified: flagsReady; loading: flagsLoading; error: flagsError"`.
@@ -266,7 +280,7 @@ This example is held to `@wcstack/state`'s own five rules. It MUST be:
      `[{ name, async? }]` (the string form was removed in `@wcstack/state`
      v1.9.1). `FlagsCore.wcBindable` already uses the object form.
 6. **Ordering**: the `/auto` scripts that register `<demo-session>`
-   (`/_shared/demo-session/auto.js`) and `<feature-flags>`
+   (`/_shared/demo-session/auto.bundle.js`) and `<feature-flags>`
    (`https://esm.run/@csbc-dev/feature-flags/auto`) must run **before** the
    `@wcstack/state/auto` script in document order.
    Module scripts execute in order, so by the time
@@ -275,7 +289,10 @@ This example is held to `@wcstack/state`'s own five rules. It MUST be:
 
 When `@wcstack/state` ships a new version, bump the pinned CDN version here and
 re-verify the binding names against `packages/state/README.md` in the wcstack
-repo — the binding surface is the contract, and a stale guess is a bug.
+repo — the binding surface is the contract, and a stale guess is a bug. The
+`@wc-bindable/*` version no longer needs a manual pin here: `npm run build:shared`
+bundles whatever version the package depends on, so the transport tracks the
+package automatically.
 
 ---
 
@@ -301,4 +318,5 @@ Then open `http://localhost:8080/` and pick an example. `identify("alice")` /
 - [ ] Compiles cleanly (§3); served from compiled output, not `.ts` at runtime.
 - [ ] Added to the shared server's mount table and the landing page.
 - [ ] No SDK, no flag rules, no credentials in the browser (§6).
-- [ ] wcstack-state stays a single CDN-based file with current-spec bindings (§7.4).
+- [ ] wcstack-state stays a single file (no import map; loads the pre-bundled shared `<demo-session>`) with current-spec bindings (§7.4).
+- [ ] `npm run smoke` passes — the shared bundle generates, its deps are inlined, and wcstack-state references it without an import map (§7.4).

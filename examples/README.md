@@ -69,8 +69,13 @@ npm start        # build (again, if needed) + serve on http://localhost:8080
 
 Then open <http://localhost:8080/> and pick an example.
 
-- `npm run serve` — serve without rebuilding (use after `npm run build`).
+- `npm run serve` — serve without rebuilding the package/framework examples (use
+  after `npm run build`). It still re-bundles the shared `<demo-session>`
+  transport on start, so wcstack-state never serves a stale/missing bundle.
 - `PORT=3000 npm run serve` — serve on a different port.
+- `npm run smoke` — headless guard for the wcstack-state generated dependency:
+  builds the shared bundle and asserts the deps are inlined and the page
+  references it with no import map (no browser, no extra deps).
 
 Click **identify("alice")** / **identify("bob")** to watch server-side targeting
 rules change the flag map, and **reload()** to force a fresh snapshot. The
@@ -95,15 +100,17 @@ rules change the flag map, and **reload()** to force a fresh snapshot. The
 - **vanilla** imports the `<feature-flags>` Shell from the package **source** via
   a Vite alias to `../../src`, and the shared `<demo-session>` transport from
   `../../shared/demo-session`; Vite bundles both.
-- **wcstack-state** is buildless and has **no inline JavaScript**: its own state
-  + `data-wcs` bindings live in one `index.html`. It registers `<feature-flags>`
-  via the **published** package's `/auto` entry on the esm.run CDN
-  (`https://esm.run/@csbc-dev/feature-flags/auto`, like the `@csbc-dev/auth0` /
-  `@csbc-dev/ai-agent` examples) and the shared `<demo-session>` via
-  `/_shared/demo-session/auto.js` served by the shared server — both side-effect
-  `<script src>` modules — plus `@wcstack/state` from a pinned CDN URL. The
-  `<demo-session>` source is the *same* module vanilla
-  bundles. See its `index.html` and CONVENTIONS.md §7.4.
+- **wcstack-state** has **no inline JavaScript** and **no import map**: its own
+  state + `data-wcs` bindings live in one `index.html`. It registers
+  `<feature-flags>` via the **published** package's `/auto` entry on the esm.run
+  CDN (`https://esm.run/@csbc-dev/feature-flags/auto`, like the `@csbc-dev/auth0`
+  / `@csbc-dev/ai-agent` examples) and the shared `<demo-session>` via
+  `/_shared/demo-session/auto.bundle.js` served by the shared server — both
+  side-effect `<script src>` modules — plus `@wcstack/state` from a pinned CDN
+  URL. The `auto.bundle.js` is the esbuild **pre-bundle** (`npm run build:shared`)
+  of the *same* `<demo-session>` source vanilla bundles, with its
+  `@wc-bindable/*` deps inlined — which is what lets the page drop the import
+  map. See its `index.html` and CONVENTIONS.md §7.4.
 
 ---
 

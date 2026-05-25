@@ -7,8 +7,10 @@
   "scripts": {
     "install:all": "npm --prefix server install --no-save && npm --prefix react install --no-save && npm --prefix vue install --no-save && npm --prefix vanilla install --no-save",
     "build:pkg": "npm --prefix .. run build",
+    "build:shared": "npm --prefix server run build:shared",
     "build:examples": "npm --prefix react run build && npm --prefix vue run build && npm --prefix vanilla run build",
-    "build": "npm run build:pkg && npm run build:examples",
+    "build": "npm run build:pkg && npm run build:shared && npm run build:examples",
+    "smoke": "npm run build:shared && node verify-shared-bundle.mjs",
     "serve": "npm --prefix server start",
     "start": "npm run build && npm run serve"
   }

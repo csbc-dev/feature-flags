@@ -8,7 +8,14 @@
  * the package itself.)
  *
  * Run:  npm install && npm start   (from examples/)  — builds first, then serves
- *       npm run dev                (from examples/server) — serve without rebuild
+ *       npm run dev                (from examples/server) — re-bundles the shared
+ *                                   <demo-session> transport (build:shared), then
+ *                                   serves the prebuilt package + example dists
+ *                                   (no package/react/vue/vanilla rebuild)
+ *
+ * `dev`/`start` both run `build:shared` first, so the wcstack-state example never
+ * serves a stale or missing `/_shared/demo-session/auto.bundle.js` after a
+ * server-only restart.
  */
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";

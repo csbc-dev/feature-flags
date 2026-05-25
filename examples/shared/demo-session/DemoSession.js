@@ -8,10 +8,11 @@
  * without Auth0.
  *
  * Shared by every example (react / vue / vanilla bundle this via Vite; the
- * buildless wcstack-state example loads it over the demo server's /_shared/
- * mount). It is plain ESM JS so both consumption styles work; the bare
- * `@wc-bindable/remote` import resolves from node_modules (Vite) or the page's
- * import map (wcstack-state).
+ * wcstack-state example loads the esbuild pre-bundle of it — auto.bundle.js —
+ * over the demo server's /_shared/ mount). It is plain ESM JS so both
+ * consumption styles work; the bare `@wc-bindable/remote` import resolves from
+ * node_modules (Vite) or is inlined by the esbuild pre-bundle (wcstack-state),
+ * so that page needs no import map.
  *
  * NOT part of the published package — this is example-only glue. In production
  * the transport comes from <auth0-session>; see the package README.

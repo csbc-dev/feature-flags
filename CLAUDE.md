@@ -210,6 +210,10 @@ Since remote 0.10 both proxies validate values as strict JSON instead of coercin
   - A bare symbol is NOT a failure (`String(Symbol())` works).
   - Never "simplify" these back to a bare `String(err)`. Pinned by `a failure that cannot be turned into a string — …` in `__tests__/FlagsCore.test.ts`.
 - **`deepCloneAndFreeze` ([src/freeze.ts](src/freeze.ts)) normalizes flag values to JSON** the way `JSON.stringify` would (drop `undefined` / function / symbol entries, `null` in arrays, non-finite → `null`, bigint → string). One bad leaf would otherwise drop the whole `flags` map on the wire.
+- **`deepCloneAndFreeze` treats an unreadable value as having no JSON form, and throws only for a map `Object.keys` rejects.**
+  - Below the top level, a throwing getter / Proxy `get` trap, a revoked Proxy, or a throwing `ownKeys` / `getOwnPropertyDescriptor` trap is dropped (`null` in an array), like `undefined`. A top-level map that cannot be enumerated (revoked Proxy, throwing trap, `null` / `undefined`) throws as is.
+  - Every `_publishFlags` call with a provider's map runs inside the `try` of the identify / reload / push that delivered it (`_doIdentify`, `reload`, the `subscribe` callback). Never move it out: outside the try, `identify()` rejected with `loading` stuck `true` and `error` unset, and a push threw into the provider's fan-out.
+  - Below the top level, a `RangeError` (what running out of stack throws, e.g. a getter chain that returns fresh objects forever) is rethrown to the top-level entry, which drops the whole flag. The check is `instanceof RangeError` inside its own `try`, never a message regex: out of stack, V8 reports the regex compile as a `SyntaxError`. Pinned by `values that cannot be read` in `__tests__/freeze.test.ts` and `a flag map that cannot be read — …` in `__tests__/FlagsCore.test.ts`.
 - **`<feature-flags>.identify()` omits `attrs` when it is absent and drops top-level `undefined` entries** — `invoke("identify", userId, undefined)` is rejected outright. Never forward an optional argument as `undefined`.
 
 ### Testing

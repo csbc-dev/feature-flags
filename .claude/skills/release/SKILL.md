@@ -37,7 +37,7 @@ Decision rules:
 - **minor** — backwards-compatible feature additions (new Provider, new option, new field on `flags`, etc.).
 - **major** — breaking changes (removing a public Shell property, changing the `FlagProvider` interface or the type of a public `FlagsCore` property, following a breaking `@wc-bindable/*` release, etc.). Pre-1.0, `@wc-bindable/*` ships breaking changes as **minor** bumps (e.g. `@wc-bindable/remote` `0.10.0` made the wire JSON-only), so judge an upstream bump by its release notes, not by which semver digit moved.
 
-> Pre-1.0 (currently 0.x), it is conventional to map breaking changes onto minor versions, but this package follows the stricter policy: **major for breaking, minor for features, patch for fixes — even before 1.0.**
+> **While the package is in `0.x.y`, map a breaking change to minor and a feature addition or fix to patch.** This is the convention of the upstream `@wc-bindable/*` line and of `@csbc-dev/ai-agent`. Upstream still ships breaking changes as 0.x minors, so a 1.0 here would not be a stable promise. Bump major only once the package is at 1.0 or later.
 
 If no tags exist yet (current state), list every commit with `git log --oneline` and decide where the "release scope" begins.
 

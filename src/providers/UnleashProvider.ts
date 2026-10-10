@@ -292,7 +292,7 @@ export class UnleashProvider implements FlagProvider {
             if (settled) return;
             /* v8 ignore stop */
             settled = true;
-            reject(err instanceof Error ? err : new Error(String(err)));
+            reject(_initError(err));
           };
           client.on("ready", onReady);
           client.on("error", onError);
@@ -507,5 +507,23 @@ function _detachQuietly(
     client.off(event, listener);
   } catch {
     // Non-fatal.
+  }
+}
+
+/**
+ * The SDK's pre-`ready` `error` payload as the `Error` the init promise
+ * rejects with — the same instance for an `Error`, `new Error(String(err))`
+ * otherwise. Never throws: `onError` has already marked the wait settled
+ * when it calls this, so a throw here would leave the init promise (and
+ * every `identify()` / `reload()` waiting on it, and `FlagsCore.dispose()`
+ * waiting on those) pending forever. A payload `String()` rejects becomes
+ * `new Error("unserializable error value")` — the same text
+ * `FlagsCore`'s `_toError` uses.
+ */
+function _initError(err: unknown): Error {
+  try {
+    return err instanceof Error ? err : new Error(String(err));
+  } catch {
+    return new Error("unserializable error value");
   }
 }

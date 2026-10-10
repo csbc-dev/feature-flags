@@ -123,8 +123,11 @@ export class FlagsCore extends EventTarget {
    * its class, `stack`, `cause` and any extra fields intact; for a failure
    * that was not an `Error` (a provider that throws a string, …), it is an
    * `Error` with the same `name` / `message` that `error` describes
-   * (`"Error"` / `String(thrown)`, see `_toError`). `null` exactly when
-   * `error` is `null`.
+   * (`"Error"` / `String(thrown)`, or `"unserializable error value"` when
+   * `String(thrown)` itself throws — see `_toError`). A provider `Error`
+   * whose `name` / `message` cannot be read as strings is still kept here
+   * as-is, while `error` falls back to that fixed text (see
+   * `_toErrorInfo`). `null` exactly when `error` is `null`.
    *
    * It is set before the Core dispatches `feature-flags:error`, so a
    * listener on the Core (or on the `target` it was constructed with) can
@@ -545,6 +548,15 @@ export class FlagsCore extends EventTarget {
 }
 
 /**
+ * Message of the `Error` that stands in for a failure the Core cannot
+ * describe — a thrown value `String()` rejects (see `_toError`), or an
+ * `Error` whose `name` / `message` cannot be read as strings (see
+ * `_toErrorInfo`). The same text `@csbc-dev/ami-voice` uses for its own
+ * hostile-value fallback.
+ */
+const UNSERIALIZABLE_ERROR_MESSAGE = "unserializable error value";
+
+/**
  * Normalize a caught provider failure to the `Error` kept as
  * `originalError` (and reduced by `_toErrorInfo` for `error`).
  *
@@ -558,9 +570,22 @@ export class FlagsCore extends EventTarget {
  * as `cause`. (Unlike it, a plain object with a `message` is not mined
  * for `name` / `message`: `error` has always read it as
  * `String(err)`, and the two must describe the same failure.)
+ *
+ * Never throws: it runs inside the Core's `catch` blocks, and a throw
+ * there would escape the "publish to `error`, never reject" path with
+ * `error` unset (and, in `identify`, `loading` stuck at `true`). A value
+ * `String()` rejects — `Object.create(null)`, a throwing `toString` /
+ * `Symbol.toPrimitive`, an object that converts to a symbol — or one
+ * `instanceof` cannot inspect (a revoked `Proxy`) becomes
+ * `new Error("unserializable error value")`. (A bare symbol is fine:
+ * `String(Symbol("x"))` is `"Symbol(x)"`.)
  */
 function _toError(err: unknown): Error {
-  return err instanceof Error ? err : new Error(String(err));
+  try {
+    return err instanceof Error ? err : new Error(String(err));
+  } catch {
+    return new Error(UNSERIALIZABLE_ERROR_MESSAGE);
+  }
 }
 
 /**
@@ -583,17 +608,26 @@ function _toError(err: unknown): Error {
  * field stay in-process on `originalError`. A non-`Error` throw arrives
  * here already as `_toError`'s `new Error(String(err))`, so it reads
  * name `"Error"`, message the string form, no `code`.
+ *
+ * Never throws, for the same reason as `_toError` (it runs inside
+ * `_setError`, called from the Core's `catch` blocks). A provider's own
+ * `Error` can still carry a `name` / `message` that `String()` rejects,
+ * or a `name` / `message` / `code` getter that throws; such an error is
+ * published as `{ name: "Error", message: "unserializable error value" }`
+ * while `originalError` keeps the instance itself.
  */
 function _toErrorInfo(err: Error): FlagsErrorInfo {
-  const info: { name: string; message: string; code?: string } = {
-    name: String(err.name),
-    message: String(err.message),
-  };
-  // Only a string `code` is kept (omitted otherwise, never `undefined`):
-  // that is the discriminator shape Node system errors use, and the one
-  // the remote error envelope forwards.
-  const code = (err as { code?: unknown }).code;
-  if (typeof code === "string") info.code = code;
+  let info: { name: string; message: string; code?: string };
+  try {
+    info = { name: String(err.name), message: String(err.message) };
+    // Only a string `code` is kept (omitted otherwise, never `undefined`):
+    // that is the discriminator shape Node system errors use, and the one
+    // the remote error envelope forwards.
+    const code = (err as { code?: unknown }).code;
+    if (typeof code === "string") info.code = code;
+  } catch {
+    info = { name: "Error", message: UNSERIALIZABLE_ERROR_MESSAGE };
+  }
   return Object.freeze(info);
 }
 

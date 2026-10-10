@@ -513,7 +513,8 @@ export class FlagsCore extends EventTarget {
   /**
    * Publish a provider's map as the new `flags` snapshot. Throws — before
    * touching any state — when `next` is not an object of flags (a string,
-   * an array, `null`, …) or cannot be enumerated at all (see
+   * an array, `null`, a built-in such as a `Map` / `Date` / `Promise`, …)
+   * or cannot be enumerated at all (see
    * `deepCloneAndFreeze`; an entry that merely cannot be read, or that
    * nests deeper than the remote wire carries, is dropped — and logged —
    * there instead). Every caller with a provider's map runs this inside

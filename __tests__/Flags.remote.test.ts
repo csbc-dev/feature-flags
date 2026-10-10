@@ -645,6 +645,27 @@ describe("<feature-flags> over a real @wc-bindable/remote session", () => {
       expect(consoleWarn).not.toHaveBeenCalled();
     });
 
+    it("a provider that returns a Map arrives as an error, not as an empty map", async () => {
+      // Regression: a `Map` was cloned as `{}` and published with
+      // `identified: true` — every flag gone, and no error.
+      const identify = vi.fn().mockResolvedValueOnce(new Map([["secret-flag-text", { enabled: true, value: null }]]));
+      const core = new FlagsCore({ provider: stubProvider({ identify }) });
+      const { el, logger, wire } = await mount(core);
+
+      await el.identify("bob");
+      await settle();
+
+      expect(el.error).toBeInstanceOf(Error);
+      expect(el.error?.name).toBe("TypeError");
+      expect(el.error?.message).toBe("[@csbc-dev/feature-flags] a flag map must be an object of flags; the provider returned a Map.");
+      expect(el.flags).toEqual({});
+      expect(el.identified).toBe(false);
+      expect(el.loading).toBe(false);
+      expect(JSON.stringify(wire.received)).not.toContain("secret-flag-text");
+      expect(logger.warn).not.toHaveBeenCalled();
+      expect(consoleWarn).not.toHaveBeenCalled();
+    });
+
     it("a flag pointing back at the map arrives as null, at the place it points", async () => {
       const map: Record<string, unknown> = { ok: true };
       map.self = map;

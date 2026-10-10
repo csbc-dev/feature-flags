@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import type { MockInstance } from "vitest";
+import { runInNewContext } from "node:vm";
 import { isJsonValue } from "@wc-bindable/remote";
 import { FlagsCore } from "../src/core/FlagsCore";
 import { __resetDroppedValueWarnings } from "../src/freeze";
@@ -1374,6 +1375,17 @@ describe("FlagsCore", () => {
       ["a boolean", () => true, "a boolean"],
       ["an array", () => [{ enabled: true }], "an array"],
       ["a function", () => () => ({ a: true }), "a function"],
+      // Regression: as objects these passed the shape check — a `Map` was
+      // published as `{}` (every flag wiped), `new String("ab")` as
+      // `{ 0: "a", 1: "b" }`. (A Promise reaches `_publishFlags` only through
+      // a push — an `async` provider's own result is awaited; see below.)
+      ["a Map", () => new Map([["secret-flag-text", { enabled: true, value: null }]]), "a Map"],
+      ["a Set", () => new Set(["secret-flag-text"]), "a Set"],
+      ["a Date", () => new Date(0), "a Date"],
+      ["an Error", () => new Error("secret-flag-text"), "an Error"],
+      ["a String object", () => new String("ab"), "a String object"],
+      ["a Uint8Array", () => new Uint8Array([1, 2]), "a Uint8Array"],
+      ["a Map from another realm", () => runInNewContext("new Map([['secret-flag-text', true]])"), "a Map"],
     ];
 
     /**
@@ -1520,6 +1532,7 @@ describe("FlagsCore", () => {
           name: "TypeError",
           message: `[@csbc-dev/feature-flags] a flag map must be an object of flags; the provider returned ${got}.`,
         });
+        expect(JSON.stringify(core.error)).not.toContain("secret-flag-text");
       });
 
       it.each(PARTLY_UNREADABLE)("%s: the readable part is published, with no error", async (_label, make, expected, logged) => {
@@ -1542,6 +1555,34 @@ describe("FlagsCore", () => {
           expect(warn.mock.calls).toEqual([[`${WARNING_PREFIX}${logged}${WARNING_SUFFIX}`]]);
         }
       });
+    });
+
+    it("a pushed Promise (a provider that forgot to await) is a provider failure, the committed map kept", async () => {
+      // Regression: published as `{}`, wiping every flag. Only a push can
+      // deliver one: an `async` provider's own Promise result is awaited.
+      let push!: (next: FlagMap) => void;
+      const provider = makeStubProvider({
+        async identify() { return COMMITTED; },
+        subscribe(_id, onChange) { push = onChange; return () => {}; },
+      });
+      const core = new FlagsCore({ provider });
+      await core.identify("alice");
+
+      expect(() => push(Promise.resolve({ b: true }) as unknown as FlagMap)).not.toThrow();
+
+      expect(core.flags).toEqual(COMMITTED);
+      expect(core.identified).toBe(true);
+      expect(core.loading).toBe(false);
+      expect(core.originalError).toBeInstanceOf(TypeError);
+      expect(core.error).toEqual({
+        name: "TypeError",
+        message: "[@csbc-dev/feature-flags] a flag map must be an object of flags; the provider returned a Promise.",
+      });
+      expect(warn).not.toHaveBeenCalled();
+
+      // The next good push is published as usual.
+      push({ b: true });
+      expect(core.flags).toEqual({ b: true });
     });
 
     it("a flag that stays unreadable is logged once — not on every reload, push and identify, nor per Core", async () => {

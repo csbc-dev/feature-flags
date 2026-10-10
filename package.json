@@ -1,6 +1,6 @@
 {
   "name": "@csbc-dev/feature-flags",
-  "version": "0.1.2",
+  "version": "0.2.0",
   "description": "Declarative feature flag observation component for Web Components. Server-side flag evaluation, reactive browser-side surface via wc-bindable-protocol.",
   "type": "module",
   "engines": {

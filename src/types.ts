@@ -202,7 +202,8 @@ export interface FlagsCoreOptions {
  *
  * `stack` is deliberately not carried (server internals must not reach
  * the browser), nor is `cause` (arbitrary provider data, not guaranteed
- * to be JSON).
+ * to be JSON). Server code that needs them reads
+ * {@link FlagsCore.originalError}, which never crosses the wire.
  */
 export interface FlagsErrorInfo {
   readonly name: string;

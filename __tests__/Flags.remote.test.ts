@@ -39,10 +39,18 @@ class LoopbackSession extends HTMLElement {
 }
 customElements.define("loopback-session", LoopbackSession);
 
+interface Loopback {
+  client: ClientTransport;
+  server: ServerTransport;
+  /** Every server → client frame, as it crossed the wire. */
+  received: ServerMessage[];
+}
+
 /** Linked client/server transports; each message is JSON round-tripped and delivered on a microtask. */
-function createLoopback(): { client: ClientTransport; server: ServerTransport } {
+function createLoopback(): Loopback {
   let toServer: ((message: ClientMessage) => void) | null = null;
   let toClient: ((message: ServerMessage) => void) | null = null;
+  const received: ServerMessage[] = [];
   return {
     client: {
       send(message) {
@@ -54,10 +62,12 @@ function createLoopback(): { client: ClientTransport; server: ServerTransport } 
     server: {
       send(message) {
         const wire = JSON.stringify(message);
+        received.push(JSON.parse(wire) as ServerMessage);
         queueMicrotask(() => toClient?.(JSON.parse(wire) as ServerMessage));
       },
       onMessage(handler) { toServer = handler; },
     },
+    received,
   };
 }
 
@@ -70,7 +80,8 @@ const disposers: Array<() => void> = [];
 
 async function mount(core: FlagsCore) {
   const logger = { warn: vi.fn(), error: vi.fn() };
-  const { client, server } = createLoopback();
+  const wire = createLoopback();
+  const { client, server } = wire;
   const shell = new RemoteShellProxy(core, server, { logger });
   const proxy = createRemoteCoreProxy(FlagsCore.wcBindable, client, { logger });
   disposers.push(() => proxy.dispose(), () => shell.dispose());
@@ -84,7 +95,7 @@ async function mount(core: FlagsCore) {
   el.target = "remote-session";
   document.body.appendChild(el);
   await settle();
-  return { el, logger };
+  return { el, logger, wire, proxy };
 }
 
 function stubProvider(overrides: Partial<FlagProvider>): FlagProvider {
@@ -247,6 +258,156 @@ describe("<feature-flags> over a real @wc-bindable/remote session", () => {
       expect(el.error?.message).toBe("string-failure");
       expect(el.error?.name).toBe("Error");
       expect(logger.warn).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("FlagsCore.originalError — the original exception stays on the server", () => {
+    const DECLARED = FlagsCore.wcBindable.properties.map((p) => p.name);
+    const PLAIN = { name: "FlagServiceError", message: "upstream refused", code: "ECONNREFUSED" };
+
+    /** A provider error with a cause and a field only the instance has. */
+    function providerError(): Error & { code: string; cause: unknown; requestId: string } {
+      return Object.assign(new Error("upstream refused"), {
+        name: "FlagServiceError",
+        code: "ECONNREFUSED",
+        cause: new Error("socket hang up"),
+        requestId: "REQ-7f3a",
+      });
+    }
+
+    /** `sync` / `update` frames: what carries property values to the browser. */
+    function propertyFrames(received: ServerMessage[]): ServerMessage[] {
+      return received.filter((m) => m.type === "sync" || m.type === "update");
+    }
+
+    /** Nothing only the instance has may appear in `text`. */
+    function expectNoInstanceDetails(text: string): void {
+      expect(text).not.toContain("socket hang up");
+      expect(text).not.toContain("REQ-7f3a");
+      expect(text).not.toContain("\"stack\"");
+      expect(text).not.toContain("\"cause\"");
+    }
+
+    it("server code reads it from the Core's error listener; sync / update / throw never carry it; recovery clears it", async () => {
+      const original = providerError();
+      const identify = vi.fn()
+        .mockRejectedValueOnce(original)
+        .mockResolvedValueOnce({ recovered: true });
+      const core = new FlagsCore({ provider: stubProvider({ identify }) });
+      // The README recipe: listen on the Core, read the instance there.
+      const seen: Array<{ detail: unknown; original: Error | null }> = [];
+      core.addEventListener("feature-flags:error", (e) => {
+        seen.push({ detail: (e as CustomEvent).detail, original: core.originalError });
+      });
+      const { el, logger, wire } = await mount(core);
+
+      // Provider failures are published, not thrown.
+      await el.identify("bob");
+      await settle();
+
+      // Server side: the provider's own instance, complete, already set
+      // when the listener ran.
+      expect(seen).toEqual([{ detail: PLAIN, original }]);
+      expect(seen[0].original).toBe(original);
+      const kept = core.originalError as ReturnType<typeof providerError>;
+      expect(kept).toBe(original);
+      expect(kept.name).toBe("FlagServiceError");
+      expect(kept.message).toBe("upstream refused");
+      expect(typeof kept.stack).toBe("string");
+      expect(kept.stack).toBe(original.stack);
+      expect((kept.cause as Error).message).toBe("socket hang up");
+      expect(kept.requestId).toBe("REQ-7f3a");
+      expect(core.error).toEqual(PLAIN);
+
+      // Browser side: an Error rebuilt from the plain value only.
+      expect(el.error).toBeInstanceOf(Error);
+      expect(el.error).not.toBe(original);
+      expect(el.error?.name).toBe("FlagServiceError");
+      expect(el.error?.message).toBe("upstream refused");
+      expect((el.error as Error & { code?: unknown }).code).toBe("ECONNREFUSED");
+      expect((el.error as Error & { cause?: unknown }).cause).toBeUndefined();
+      expect((el.error as Error & { requestId?: unknown }).requestId).toBeUndefined();
+
+      // The wire. Property frames carry declared names only, and `error` as
+      // exactly `{ name, message, code }`.
+      const props = propertyFrames(wire.received);
+      for (const m of props) {
+        if (m.type === "sync") {
+          for (const name of Object.keys(m.values)) expect(DECLARED).toContain(name);
+        } else if (m.type === "update") {
+          expect(DECLARED).toContain(m.name);
+        }
+      }
+      const errorUpdates = props.filter((m) => m.type === "update" && m.name === "error" && m.value !== null);
+      expect(errorUpdates.map((m) => (m as { value: unknown }).value)).toEqual([PLAIN]);
+      // No `throw` frame either: `identify` resolved after publishing.
+      expect(wire.received.filter((m) => m.type === "throw")).toEqual([]);
+      expect(JSON.stringify(wire.received)).not.toContain("originalError");
+      expectNoInstanceDetails(JSON.stringify(wire.received));
+      expect(logger.warn).not.toHaveBeenCalled();
+
+      // Recovery: the retry clears `error` and `originalError` together.
+      await el.reload();
+      await settle();
+      expect(seen).toEqual([
+        { detail: PLAIN, original },
+        { detail: null, original: null },
+      ]);
+      expect(core.error).toBeNull();
+      expect(core.originalError).toBeNull();
+      expect(el.error).toBeNull();
+      expect(el.flags).toEqual({ recovered: true });
+      expectNoInstanceDetails(JSON.stringify(wire.received));
+    });
+
+    it("a session that connects after the failure gets the plain error in sync, not the instance", async () => {
+      const original = providerError();
+      const core = new FlagsCore({
+        provider: stubProvider({ async identify() { throw original; } }),
+      });
+      await core.identify("bob");
+      expect(core.originalError).toBe(original);
+
+      const { el, logger, wire } = await mount(core);
+
+      const sync = wire.received.find((m) => m.type === "sync") as Extract<ServerMessage, { type: "sync" }>;
+      expect(sync.values.error).toEqual(PLAIN);
+      for (const name of Object.keys(sync.values)) expect(DECLARED).toContain(name);
+      expect(sync.getterFailures).toBeUndefined();
+      expect(JSON.stringify(wire.received)).not.toContain("originalError");
+      expectNoInstanceDetails(JSON.stringify(wire.received));
+      expect(el.error?.message).toBe("upstream refused");
+      expect(logger.warn).not.toHaveBeenCalled();
+    });
+
+    it("a client cannot read or reset it: hand-written cmd / set frames are refused", async () => {
+      const original = providerError();
+      const core = new FlagsCore({
+        provider: stubProvider({ async identify() { throw original; } }),
+      });
+      const { wire, proxy } = await mount(core);
+      await core.identify("bob");
+      await settle();
+
+      // The consumer-side proxy refuses it before sending…
+      await expect(proxy.invoke("originalError"))
+        .rejects.toMatchObject({ code: "WC_BINDABLE_UNDECLARED_COMMAND" });
+
+      // …and the producer refuses hand-written frames, as a hostile client
+      // would send them.
+      wire.client.send({ type: "cmd", name: "originalError", id: "probe-cmd", args: [] });
+      wire.client.send({ type: "set", name: "originalError", value: null, id: "probe-set" });
+      await settle();
+
+      const answer = (id: string) =>
+        wire.received.find((m) => m.type === "throw" && m.id === id) as
+          Extract<ServerMessage, { type: "throw" }> | undefined;
+      // The refusals name the probed member, and that is all they carry.
+      expect(answer("probe-cmd")?.error).toMatchObject({ code: "WC_BINDABLE_UNDECLARED_COMMAND" });
+      expect(answer("probe-set")?.error).toMatchObject({ code: "WC_BINDABLE_UNDECLARED_INPUT" });
+      expectNoInstanceDetails(JSON.stringify(wire.received));
+      expect(core.originalError).toBe(original);
+      expect(core.error).toEqual(PLAIN);
     });
   });
 

@@ -102,7 +102,7 @@ Any transport-layer dependency already comes from `@csbc-dev/auth0` (via `@wc-bi
 
 - **The session proxy must come from `@wc-bindable/remote` 0.7 or later.** `<feature-flags>` replays the proxy's current values through `@wc-bindable/core`'s `bind()`, which (since core 0.7) detects them with the `in` operator; a `RemoteCoreProxy` answers that only from 0.7 on. Against an older proxy, a snapshot that synced before `<feature-flags>` attached is not replayed.
 - **Remote 0.10 carries JSON values only** and rejects anything else instead of coercing it. This package is built for that: `identify()` attrs must be JSON (see [Identity](#identity)), flag values are normalized (see [Schema-less design](#schema-less-design)), and `error` travels as a plain object (see [Error contract](#error-contract)).
-- **`FlagsCore.error` is a `FlagsErrorInfo` (`{ name, message, code? }`), not an `Error`.** Server-side code that read `core.error` — or the Core's own `feature-flags:error` event — as an `Error` instance (`instanceof Error`, `.stack`, `.cause`) must switch to these fields. The browser-side `<feature-flags>.error` is still `Error | null`.
+- **`FlagsCore.error` is a `FlagsErrorInfo` (`{ name, message, code? }`), not an `Error`.** Server-side code that read `core.error` — or the Core's own `feature-flags:error` event — as an `Error` instance (`instanceof Error`, `.stack`, `.cause`) must switch to these fields, or read the instance from `core.originalError` (see [Logging the original error on the server](#logging-the-original-error-on-the-server)). The browser-side `<feature-flags>.error` is still `Error | null`.
 
 ## Server setup (Flagsmith)
 
@@ -123,14 +123,26 @@ createAuthenticatedWSS({
   port: 8080,
   auth0Domain: "your.auth0.domain",
   auth0Audience: "https://api.example.com/",
-  createCores: (user) => new FlagsCore({
-    provider,
-    userContext: user,  // auto-identify using user.sub + traits
-  }),
+  createCores: (user) => {
+    const core = new FlagsCore({
+      provider,
+      userContext: user,  // auto-identify using user.sub + traits
+    });
+    // Log provider failures with the original exception (class, stack,
+    // cause, extra fields). The browser only gets `core.error`'s plain
+    // { name, message, code? }; `core.originalError` is not part of the
+    // wire contract and stays here.
+    core.addEventListener("feature-flags:error", () => {
+      if (core.originalError) logger.error(core.originalError);
+    });
+    return core;
+  },
   onTokenRefresh: (core, user) =>
     (core as FlagsCore).updateUserContext(user),
 });
 ```
+
+See [Logging the original error on the server](#logging-the-original-error-on-the-server) for what `core.originalError` holds.
 
 Register the `FlagsCore` declaration on the client:
 
@@ -179,9 +191,24 @@ The `realtime: true` option is accepted on `FlagsmithProviderOptions` for forwar
 - **Transport failures** are handled one layer up by `<auth0-session>` — its `connected-changed: false` unwinds the subscription and the last-known flag map is retained until a fresh session lights up.
 - **Precondition violations** (missing provider, dispose-after-use, `<feature-flags>.identify()` / `.reload()` invoked before a session proxy has attached, `setConfig({ tagNames: { flags: "" } })`) throw synchronously.
 - **Target resolution failures** are not fatal: `<feature-flags target="...">` first emits a `did not resolve` error and rescues for up to **30 s** (DOM mutation observer + exponential-backoff property-poll). If the target still has not resolved by then, a final `did not resolve within 30s; giving up.` error is published and rescue stops. Bind `error` to surface either state.
-- **Errors cross the wire as plain objects.** `FlagsCore.error` (and the `detail` of the Core's `feature-flags:error` event) is a frozen `FlagsErrorInfo` — `{ name, message, code? }`, with `code` present only when the provider's error carried a string one — rather than an `Error` instance, because `@wc-bindable/remote` 0.10+ carries JSON values only and would silently drop an `Error`. `stack` and `cause` are not sent. A non-`Error` throw is described as `{ name: "Error", message: String(thrown) }`. `<feature-flags>` re-hydrates the payload into an `Error` with `message` / `name` / `code` (and a `cause`, if a payload carries one) restored, so on the browser side `el.error instanceof Error` and `el.error.name === "TypeError"` continue to discriminate after the round-trip.
+- **Errors cross the wire as plain objects.** `FlagsCore.error` (and the `detail` of the Core's `feature-flags:error` event) is a frozen `FlagsErrorInfo` — `{ name, message, code? }`, with `code` present only when the provider's error carried a string one — rather than an `Error` instance, because `@wc-bindable/remote` 0.10+ carries JSON values only and would silently drop an `Error`. `stack` and `cause` are not sent; server code reads them from `core.originalError` (next section). A non-`Error` throw is described as `{ name: "Error", message: String(thrown) }`. `<feature-flags>` re-hydrates the payload into an `Error` with `message` / `name` / `code` (and a `cause`, if a payload carries one) restored, so on the browser side `el.error instanceof Error` and `el.error.name === "TypeError"` continue to discriminate after the round-trip.
 - **LaunchDarkly option validation**: `contextKind: "multi"` is reserved for multi-kind contexts and rejected at construction; `pollInterval` / `initializationTimeoutMs` reject `NaN`, `Infinity`, and negative values (Flagsmith / Unleash do the same for their interval options).
 - **Identity attribute coercion**: Flagsmith / Unleash stringify trait values into their respective context shapes — `bigint` traits are coerced via `String(v)` rather than rejected, so `BigInt(42)` round-trips as the string `"42"` instead of throwing.
+
+### Logging the original error on the server
+
+To log or monitor the original exception on the server, read **`core.originalError`** (`Error | null`). In a remote setup this is the only way to get it: a provider failure is published on `error`, not thrown, so no promise in your server code rejects with it, and `error` carries only `{ name, message, code? }`.
+
+```ts
+core.addEventListener("feature-flags:error", () => {
+  if (core.originalError) logger.error(core.originalError);
+});
+```
+
+- It is the provider's own `Error` instance, with its class, `stack`, `cause` and extra fields intact. A failure that was not an `Error` (a provider that throws a string, …) is an `Error` with the same `name` / `message` that `error` describes: `"Error"` / `String(thrown)`.
+- It changes together with `error`: it is set before the Core dispatches `feature-flags:error`, and it is `null` whenever `error` is — including at the start of the next `identify` / `reload` attempt, which clears both. Listen on the Core (or on the `target` you constructed it with) and read it there, as in the [server setup](#server-setup-flagsmith).
+- It covers the provider failures the Core publishes on `error` (`identify` / `subscribe` / `reload`). Precondition violations (`identify("")`, a call after `dispose()`) throw without touching `error` and do not appear here, nor does the failure of a superseded `identify` / `reload`, which is discarded.
+- It is **not** declared in `FlagsCore.wcBindable`. `RemoteShellProxy` reads, forwards and accepts only declared names, so this value is never sent in a `sync` or an `update`, and a client cannot invoke or set it (`WC_BINDABLE_UNDECLARED_COMMAND` / `WC_BINDABLE_UNDECLARED_INPUT`). The browser-side `<feature-flags>` has no `originalError`; its `error` is rebuilt from the plain object.
 
 ## Server setup (Unleash)
 

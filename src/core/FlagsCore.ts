@@ -49,6 +49,12 @@ export class FlagsCore extends EventTarget {
   private _identified = false;
   private _loading = false;
   private _error: FlagsErrorInfo | null = null;
+  // The exception behind `_error`, before `_toErrorInfo` reduced it for
+  // the wire: the provider's own `Error` (class, `stack`, `cause`, extra
+  // fields), or the `Error` `_toError` built for a non-`Error` throw.
+  // In-process only — see `originalError`. Written only by `_setError`,
+  // so it is `null` exactly when `_error` is.
+  private _errorSource: Error | null = null;
 
   private _currentIdentity: FlagIdentity | null = null;
   private _unsubscribeProvider: FlagUnsubscribe | null = null;
@@ -105,9 +111,47 @@ export class FlagsCore extends EventTarget {
    * {@link FlagsErrorInfo} — not an `Error` instance — because this
    * property crosses the remote wire; see `_toErrorInfo`.
    * `<feature-flags>` re-hydrates it into an `Error` on the browser side.
+   * Server code that needs the exception itself reads `originalError`.
    */
   get error(): FlagsErrorInfo | null {
     return this._error;
+  }
+
+  /**
+   * The exception behind `error`, as the Core caught it — for server-side
+   * logging and monitoring. It is the provider's own `Error` instance, with
+   * its class, `stack`, `cause` and any extra fields intact; for a failure
+   * that was not an `Error` (a provider that throws a string, …), it is an
+   * `Error` with the same `name` / `message` that `error` describes
+   * (`"Error"` / `String(thrown)`, see `_toError`). `null` exactly when
+   * `error` is `null`.
+   *
+   * It is set before the Core dispatches `feature-flags:error`, so a
+   * listener on the Core (or on the `target` it was constructed with) can
+   * read it:
+   *
+   * ```ts
+   * core.addEventListener("feature-flags:error", () => {
+   *   if (core.originalError) log.error(core.originalError);
+   * });
+   * ```
+   *
+   * This is the only way to see it in a remote setup: provider failures
+   * (`identify` / `subscribe` / `reload`) are published on `error`, not
+   * thrown, and `error` itself carries only `{ name, message, code? }`.
+   * Precondition violations (missing `userId`, use after `dispose`) throw
+   * without touching `error` and do not appear here; nor does the failure
+   * of a superseded identify / reload, which is discarded.
+   *
+   * Deliberately NOT a declared `wcBindable` property (and must never
+   * become one): `RemoteShellProxy` reads, forwards and accepts only the
+   * declared names, so this value never reaches a `sync`, an `update` or a
+   * command reply, and the browser keeps receiving the plain
+   * {@link FlagsErrorInfo}. Returned as-is, not copied — it is the
+   * exception object itself.
+   */
+  get originalError(): Error | null {
+    return this._errorSource;
   }
 
   // --- Commands -------------------------------------------------------------
@@ -195,7 +239,7 @@ export class FlagsCore extends EventTarget {
         this._publishFlags(next);
       } catch (err) {
         if (this._generation !== myGen) return;
-        this._setError(_toErrorInfo(err));
+        this._setError(_toError(err));
       } finally {
         if (reloadPromise) this._inFlight.delete(reloadPromise);
         if (this._generation === myGen) this._setLoading(false);
@@ -397,7 +441,7 @@ export class FlagsCore extends EventTarget {
       // via `_doIdentify` (see `reload()`).
       this._publishFlags(EMPTY_FLAGS);
       this._setIdentified(false);
-      this._setError(_toErrorInfo(err));
+      this._setError(_toError(err));
       this._setLoading(false);
       return;
     } finally {
@@ -436,7 +480,7 @@ export class FlagsCore extends EventTarget {
       /* v8 ignore start -- sync subscribe throw between an already-awaited identify and its own line cannot observe a concurrent gen bump */
       if (this._generation !== myGen) return;
       /* v8 ignore stop */
-      this._setError(_toErrorInfo(err));
+      this._setError(_toError(err));
     }
   }
 
@@ -473,23 +517,56 @@ export class FlagsCore extends EventTarget {
     }));
   }
 
-  private _setError(value: FlagsErrorInfo | null): void {
+  /**
+   * The one writer of `error` and `originalError`. Takes the failure
+   * already normalized to an `Error` by `_toError` (or `null` to clear),
+   * keeps it as `originalError`, and publishes its `_toErrorInfo`
+   * reduction as `error`. Never pass a raw caught value: `null` here means
+   * "clear", so a provider that throws `null` must go through `_toError`
+   * (which turns it into `Error("null")`) like any other failure.
+   */
+  private _setError(source: Error | null): void {
     // Dedupe only the null → null case. A non-null error is always
     // re-dispatched — a successive distinct failure must stay
     // observable even when it happens to === the previous by
     // reference (pathological, but test frameworks do assert on it).
-    if (value === null && this._error === null) return;
-    this._error = value;
+    if (source === null && this._error === null) return;
+    // Both slots are written together (the reduction first, so they cannot
+    // part ways) and before the dispatch, so a listener on the Core reads
+    // the `originalError` that goes with this event's `detail`.
+    const info = source === null ? null : _toErrorInfo(source);
+    this._errorSource = source;
+    this._error = info;
     this._target.dispatchEvent(new CustomEvent("feature-flags:error", {
-      detail: value,
+      detail: this._error,
       bubbles: true,
     }));
   }
 }
 
 /**
- * Reduce a caught provider failure to the JSON-safe {@link FlagsErrorInfo}
- * published on `error` (both the getter and the event `detail`).
+ * Normalize a caught provider failure to the `Error` kept as
+ * `originalError` (and reduced by `_toErrorInfo` for `error`).
+ *
+ * An `Error` is returned as the same instance — class, `stack`, `cause`
+ * and extra fields untouched. Anything else becomes
+ * `new Error(String(err))`: name `"Error"`, message the string form —
+ * the reading `error` has always given a non-`Error` throw. `String(err)`
+ * is passed explicitly so that `throw undefined` still reads `"undefined"`
+ * (`new Error(undefined)` would leave the message empty). As in
+ * `@csbc-dev/s3-uploader`'s `toError`, the thrown value is not attached
+ * as `cause`. (Unlike it, a plain object with a `message` is not mined
+ * for `name` / `message`: `error` has always read it as
+ * `String(err)`, and the two must describe the same failure.)
+ */
+function _toError(err: unknown): Error {
+  return err instanceof Error ? err : new Error(String(err));
+}
+
+/**
+ * Reduce a caught provider failure (normalized by `_toError`) to the
+ * JSON-safe {@link FlagsErrorInfo} published on `error` (both the getter
+ * and the event `detail`).
  *
  * Why not publish the `Error` itself: `error` is a bindable property,
  * and `@wc-bindable/remote` (0.10+) only carries JSON values. An `Error`
@@ -502,14 +579,12 @@ export class FlagsCore extends EventTarget {
  * through `JSON.stringify` to `{}`, which lost the message instead.)
  *
  * Kept: `name`, `message`, and a string `code` — the fields
- * `<feature-flags>` restores on its side. A non-`Error` throw keeps the
- * previous `new Error(String(err))` reading: name `"Error"`, message the
- * string form.
+ * `<feature-flags>` restores on its side. `stack`, `cause` and any other
+ * field stay in-process on `originalError`. A non-`Error` throw arrives
+ * here already as `_toError`'s `new Error(String(err))`, so it reads
+ * name `"Error"`, message the string form, no `code`.
  */
-function _toErrorInfo(err: unknown): FlagsErrorInfo {
-  if (!(err instanceof Error)) {
-    return Object.freeze({ name: "Error", message: String(err) });
-  }
+function _toErrorInfo(err: Error): FlagsErrorInfo {
   const info: { name: string; message: string; code?: string } = {
     name: String(err.name),
     message: String(err.message),

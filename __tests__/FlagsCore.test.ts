@@ -944,6 +944,209 @@ describe("FlagsCore", () => {
     });
   });
 
+  describe("originalError — the exception behind `error`, for server-side code", () => {
+    // `error` is the plain `FlagsErrorInfo` the browser receives. Server
+    // code that logs / monitors failures needs the exception itself, and a
+    // provider failure is published, never thrown, so the Core keeps it.
+
+    /** A provider error with a cause and a field only the instance has. */
+    function providerError(message = "upstream refused"): Error & { code: string; cause: unknown; requestId: string } {
+      return Object.assign(new Error(message), {
+        name: "FlagServiceError",
+        code: "ECONNREFUSED",
+        cause: new Error("socket hang up"),
+        requestId: "REQ-7f3a",
+      });
+    }
+
+    /** Records each error event with the `originalError` visible at that moment. */
+    function errorRecorder(target: EventTarget, core: FlagsCore) {
+      const seen: Array<{ detail: unknown; original: Error | null }> = [];
+      target.addEventListener("feature-flags:error", (e) => {
+        seen.push({ detail: (e as CustomEvent).detail, original: core.originalError });
+      });
+      return seen;
+    }
+
+    it("is null initially and is not part of the bindable surface", () => {
+      const core = new FlagsCore({ provider: new InMemoryFlagProvider() });
+      expect(core.originalError).toBeNull();
+      // `inputs` is not in `IWcBindable` (the Core declares none), but
+      // `RemoteShellProxy` would accept a `set` for any name listed there.
+      const { inputs = [] } = FlagsCore.wcBindable as { inputs?: ReadonlyArray<{ name: string }> };
+      const declared = [
+        ...FlagsCore.wcBindable.properties.map((p) => p.name),
+        ...inputs.map((i) => i.name),
+        ...(FlagsCore.wcBindable.commands ?? []).map((c) => c.name),
+      ];
+      expect(declared).not.toContain("originalError");
+    });
+
+    it("identify rejection: the provider's own instance — name, message, stack, cause, extra fields intact", async () => {
+      const err = providerError();
+      const core = new FlagsCore({ provider: makeStubProvider({ async identify() { throw err; } }) });
+      await core.identify("alice");
+
+      const original = core.originalError as typeof err;
+      expect(original).toBe(err);
+      expect(original.name).toBe("FlagServiceError");
+      expect(original.message).toBe("upstream refused");
+      expect(typeof original.stack).toBe("string");
+      expect(original.stack).toBe(err.stack);
+      expect(original.cause).toBe(err.cause);
+      expect(original.requestId).toBe("REQ-7f3a");
+      // …while the published value stays the frozen plain reduction.
+      expect(core.error).toEqual({ name: "FlagServiceError", message: "upstream refused", code: "ECONNREFUSED" });
+      expect(isJsonValue(core.error)).toBe(true);
+    });
+
+    it("identify synchronous throw: the thrown instance", async () => {
+      const err = providerError("sync identify boom");
+      const p: FlagProvider = {
+        identify: (() => { throw err; }) as FlagProvider["identify"],
+        subscribe: () => () => {},
+        async reload() { return {}; },
+      };
+      const core = new FlagsCore({ provider: p });
+      await core.identify("alice");
+      expect(core.originalError).toBe(err);
+      expect(core.error?.message).toBe("sync identify boom");
+    });
+
+    it("reload rejection: the provider's own instance", async () => {
+      const err = providerError("reload-failed");
+      const core = new FlagsCore({ provider: makeStubProvider({ async reload() { throw err; } }) });
+      await core.identify("alice");
+      expect(core.originalError).toBeNull();
+      await core.reload();
+      expect(core.originalError).toBe(err);
+      expect(core.error?.message).toBe("reload-failed");
+      expect(core.identified).toBe(true);
+    });
+
+    it("reload synchronous throw: the thrown instance", async () => {
+      const err = providerError("sync reload boom");
+      const p: FlagProvider = {
+        async identify() { return {}; },
+        subscribe: () => () => {},
+        reload: (() => { throw err; }) as FlagProvider["reload"],
+      };
+      const core = new FlagsCore({ provider: p });
+      await core.identify("alice");
+      await core.reload();
+      expect(core.originalError).toBe(err);
+    });
+
+    it("subscribe throw: the thrown instance, next to the committed snapshot", async () => {
+      const err = providerError("subscribe-failed");
+      const core = new FlagsCore({ provider: makeStubProvider({ subscribe() { throw err; } }) });
+      await core.identify("alice");
+      expect(core.identified).toBe(true);
+      expect(core.originalError).toBe(err);
+      expect(core.error?.message).toBe("subscribe-failed");
+    });
+
+    it.each([
+      ["a string", "string-failure", "string-failure"],
+      ["a number", 42, "42"],
+      ["null", null, "null"],
+      ["undefined", undefined, "undefined"],
+      ["a plain object", { message: "plain" }, "[object Object]"],
+    ])("a non-Error throw (%s) becomes an Error with the same name / message `error` describes", async (_label, thrown, message) => {
+      const core = new FlagsCore({ provider: makeStubProvider({ async identify() { throw thrown; } }) });
+      await core.identify("alice");
+
+      const original = core.originalError;
+      expect(original).toBeInstanceOf(Error);
+      expect(original).not.toBe(thrown);
+      expect(original?.name).toBe("Error");
+      expect(original?.message).toBe(message);
+      expect(typeof original?.stack).toBe("string");
+      expect(original && "cause" in original).toBe(false);
+      // A throw of `null` / `undefined` is still a failure, never a clear.
+      expect(core.error).toEqual({ name: original?.name, message: original?.message });
+    });
+
+    it("is set before feature-flags:error is dispatched, and clears with `error`", async () => {
+      const err = providerError();
+      const identify = vi.fn()
+        .mockRejectedValueOnce(err)
+        .mockResolvedValueOnce({ a: true });
+      const core = new FlagsCore({ provider: makeStubProvider({ identify }) });
+      const seen = errorRecorder(core, core);
+
+      await core.identify("alice");
+      await core.identify("alice"); // starts by clearing the slot, then succeeds
+
+      expect(seen).toEqual([
+        { detail: { name: "FlagServiceError", message: "upstream refused", code: "ECONNREFUSED" }, original: err },
+        { detail: null, original: null },
+      ]);
+      expect(seen[0].original).toBe(err);
+      expect(core.error).toBeNull();
+      expect(core.originalError).toBeNull();
+    });
+
+    it("is readable from a listener on an injected target", async () => {
+      const target = new EventTarget();
+      const err = providerError();
+      const core = new FlagsCore({ target, provider: makeStubProvider({ async identify() { throw err; } }) });
+      const seen = errorRecorder(target, core);
+      await core.identify("alice");
+      expect(seen).toHaveLength(1);
+      expect(seen[0].original).toBe(err);
+    });
+
+    it("a reload retry clears it, and each new failure replaces it", async () => {
+      const first = providerError("first");
+      const second = providerError("second");
+      const reload = vi.fn()
+        .mockRejectedValueOnce(first)
+        .mockRejectedValueOnce(second)
+        .mockResolvedValueOnce({ ok: true });
+      const core = new FlagsCore({ provider: makeStubProvider({ reload }) });
+      const seen = errorRecorder(core, core);
+      await core.identify("alice");
+
+      await core.reload();
+      expect(core.originalError).toBe(first);
+      await core.reload();
+      expect(core.originalError).toBe(second);
+      await core.reload();
+      expect(core.originalError).toBeNull();
+      expect(core.flags).toEqual({ ok: true });
+
+      expect(seen.map((s) => s.original)).toEqual([first, null, second, null]);
+      // `null` exactly when `error` is, at every event.
+      for (const s of seen) expect(s.original === null).toBe(s.detail === null);
+    });
+
+    it("a superseded failure leaves it untouched", async () => {
+      let rejectFirst!: (e: unknown) => void;
+      const identify = vi.fn()
+        .mockImplementationOnce(() => new Promise<FlagMap>((_, rej) => { rejectFirst = rej; }))
+        .mockResolvedValueOnce({ b: true });
+      const core = new FlagsCore({ provider: makeStubProvider({ identify }) });
+      const first = core.identify("alice");
+      await core.identify("bob");
+      rejectFirst(providerError("stale"));
+      await first;
+      expect(core.error).toBeNull();
+      expect(core.originalError).toBeNull();
+    });
+
+    it("a precondition violation throws without touching it", async () => {
+      const err = providerError();
+      const core = new FlagsCore({ provider: makeStubProvider({ async identify() { throw err; } }) });
+      await core.identify("alice");
+      await expect(core.identify("")).rejects.toThrow(/`userId` is required/);
+      expect(core.originalError).toBe(err);
+      await core.dispose();
+      await expect(core.reload()).rejects.toThrow(/disposed/);
+      expect(core.originalError).toBe(err);
+    });
+  });
+
   describe("updateUserContext + manual identify interaction", () => {
     it("re-identifies when _currentIdentity drifted from the refreshed userContext", async () => {
       // Regression: a manual identify("bob") overrides the

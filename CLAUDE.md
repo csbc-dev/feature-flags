@@ -204,6 +204,11 @@ Since remote 0.10 both proxies validate values as strict JSON instead of coercin
   - `_setError(source: Error | null)` is its only writer. Callers pass `_toError(err)`, never a raw caught value: `null` there means "clear", so `throw null` must become `Error("null")`.
   - It stores the instance in `_errorSource` and the `_toErrorInfo` reduction in `_error` *before* dispatching `feature-flags:error`, so a listener on the Core can log it. It is `null` exactly when `error` is.
   - Never add it to `FLAGS_WC_BINDABLE`: declaring it would push the instance (stack, cause, extra fields) to every client through `sync` / `update`, and as an `Error` it would also be dropped as a non-JsonValue. Pinned by `FlagsCore.originalError — …` in `__tests__/Flags.remote.test.ts` and `originalError — …` in `__tests__/FlagsCore.test.ts`.
+- **`_toError` / `_toErrorInfo` (Core), `_asErrorOrNull` (Shell) and UnleashProvider's `_initError` never throw.** They run inside `catch` blocks, the `bind()` callback or an already-settled `onError`. A throw there used to leave `loading` stuck `true`, `error` unset, the element unbound, or the init promise pending forever.
+  - A value that `String()` / `instanceof` rejects becomes `Error("unserializable error value")` (the same text as `@csbc-dev/ami-voice`).
+  - A provider `Error` with an unreadable `name` / `message` / `code` is published as `{ name: "Error", message: "unserializable error value" }`, while `originalError` keeps the instance.
+  - A bare symbol is NOT a failure (`String(Symbol())` works).
+  - Never "simplify" these back to a bare `String(err)`. Pinned by `a failure that cannot be turned into a string — …` in `__tests__/FlagsCore.test.ts`.
 - **`deepCloneAndFreeze` ([src/freeze.ts](src/freeze.ts)) normalizes flag values to JSON** the way `JSON.stringify` would (drop `undefined` / function / symbol entries, `null` in arrays, non-finite → `null`, bigint → string). One bad leaf would otherwise drop the whole `flags` map on the wire.
 - **`<feature-flags>.identify()` omits `attrs` when it is absent and drops top-level `undefined` entries** — `invoke("identify", userId, undefined)` is rejected outright. Never forward an optional argument as `undefined`.
 

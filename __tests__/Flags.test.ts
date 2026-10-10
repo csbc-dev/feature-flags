@@ -586,6 +586,65 @@ describe("<feature-flags>", () => {
     expect(el.error?.message).toBe("[unserializable error payload]");
   });
 
+  it("JSON-stringifies an error payload whose String() throws", async () => {
+    // A JSON object whose own `toString` is not a function has no string
+    // form (`String()` throws) — and, unlike the hostile values below, the
+    // remote wire can carry one. Treated like a useless String(): the JSON
+    // fallback keeps its fields observable.
+    const sess = makeSession();
+    const el = makeFlagsEl();
+    sess.ready = true;
+    await flush();
+    const fromWire = JSON.parse('{"toString":1,"detail":"bad gateway"}');
+    expect(() => String(fromWire)).toThrow(); // the premise
+    sess.proxy!._publish("error", fromWire);
+    expect(el.error?.message).toBe('{"toString":1,"detail":"bad gateway"}');
+    sess.proxy!._publish("error", Object.assign(Object.create(null), { code: 503 }));
+    expect(el.error?.message).toBe('{"code":503}');
+    // …and the sentinel when JSON.stringify fails too.
+    const cyclic = Object.create(null);
+    cyclic.self = cyclic;
+    sess.proxy!._publish("error", cyclic);
+    expect(el.error?.message).toBe("[unserializable error payload]");
+  });
+
+  it.each([
+    ["a revoked Proxy", () => { const r = Proxy.revocable({}, {}); r.revoke(); return r.proxy; }],
+    ["a throwing message getter", () => ({ get message(): string { throw new Error("trap"); } })],
+    ["a throwing name getter", () => ({ message: "m", get name(): string { throw new Error("trap"); } })],
+    ["a function whose toString throws", () => Object.assign(() => {}, { toString() { throw new Error("trap"); } })],
+  ])("an error payload that cannot be read (%s) becomes the sentinel instead of throwing", async (_label, make) => {
+    // Only a mock / in-process proxy can deliver these. A throw from the
+    // bind() callback would leave `el.error` stale.
+    const sess = makeSession();
+    const el = makeFlagsEl();
+    sess.ready = true;
+    await flush();
+    sess.proxy!._publish("error", make());
+    expect(el.error).toBeInstanceOf(Error);
+    expect(el.error?.message).toBe("[unserializable error payload]");
+    // The binding is intact.
+    sess.proxy!._publish("loading", true);
+    sess.proxy!._publish("error", null);
+    expect(el.loading).toBe(true);
+    expect(el.error).toBeNull();
+  });
+
+  it("an unreadable error payload present at bind time does not abort the initial sync", async () => {
+    // A throw from the callback during bind()'s initial replay makes bind()
+    // remove its listeners and rethrow — the element would never bind.
+    const sess = makeSession();
+    sess.ready = true;
+    const revoked = Proxy.revocable({}, {});
+    revoked.revoke();
+    sess.proxy!._publish("error", revoked.proxy);
+    const el = makeFlagsEl();
+    await flush();
+    expect(el.error?.message).toBe("[unserializable error payload]");
+    sess.proxy!._publish("flags", { post: true });
+    expect(el.flags).toEqual({ post: true });
+  });
+
   it("wraps primitive non-string error payloads via String()", async () => {
     // Numbers / booleans / bigints / symbols hit the final fallback
     // (neither null/undefined, nor Error, nor string, nor object).

@@ -565,8 +565,32 @@ function _withoutUndefinedEntries(attrs: Record<string, unknown>): Record<string
   return Object.fromEntries(Object.entries(attrs).filter(([, v]) => v !== undefined));
 }
 
+/**
+ * Message of the `Error` that stands in for an `error` payload nothing
+ * readable can be extracted from.
+ */
+const UNSERIALIZABLE_ERROR_PAYLOAD = "[unserializable error payload]";
+
+/**
+ * The proxy's `error` value as an `Error` (or `null` to clear).
+ *
+ * Never throws: it runs inside the `bind()` callback, where a throw during
+ * the initial sync makes `bind()` tear down its listeners and rethrow
+ * (leaving this element unbound), and a throw on an update leaves `error`
+ * stale. A payload whose `instanceof` / field reads / `String()` throw — a
+ * revoked `Proxy`, a throwing getter, `Object.create(null)`, … — becomes
+ * the `"[unserializable error payload]"` sentinel instead.
+ */
 function _asErrorOrNull(value: unknown): Error | null {
   if (value === null || value === undefined) return null;
+  try {
+    return _payloadToError(value);
+  } catch {
+    return new Error(UNSERIALIZABLE_ERROR_PAYLOAD);
+  }
+}
+
+function _payloadToError(value: unknown): Error {
   if (value instanceof Error) return value;
   if (typeof value === "string") return new Error(value);
   if (typeof value === "object") {
@@ -601,7 +625,16 @@ function _asErrorOrNull(value: unknown): Error | null {
     //     otherwise become a useless `new Error("")` with no message
     //     on the error channel. JSON-stringifying keeps the payload's
     //     contents observable to consumers binding to `error`.
-    const s = String(value);
+    // A `String()` that throws is as useless as an empty one. That is
+    // not only a hostile in-process value: a JSON object whose own
+    // `toString` is not a function (`{"toString":1}`) — which the remote
+    // wire can carry — has no string form either.
+    let s = "";
+    try {
+      s = String(value);
+    } catch {
+      // keep `s` empty
+    }
     if (s !== "[object Object]" && s !== "") return new Error(s);
     try {
       return new Error(JSON.stringify(value));
@@ -609,7 +642,7 @@ function _asErrorOrNull(value: unknown): Error | null {
       // `JSON.stringify` threw (cycle / BigInt). Surface `s` if it
       // carries anything, otherwise a stable sentinel — never an
       // empty-message Error.
-      return new Error(s !== "" ? s : "[unserializable error payload]");
+      return new Error(s !== "" ? s : UNSERIALIZABLE_ERROR_PAYLOAD);
     }
   }
   return new Error(String(value));

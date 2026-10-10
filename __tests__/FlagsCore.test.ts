@@ -1147,6 +1147,163 @@ describe("FlagsCore", () => {
     });
   });
 
+  describe("a failure that cannot be turned into a string — published like any other, never thrown", () => {
+    // Regression: `_toError` did `new Error(String(err))` inside the Core's
+    // `catch` blocks, so a provider failure `String()` rejects threw from
+    // the `catch` itself — `identify()` rejected with `loading` stuck at
+    // `true`, and `reload()` / a `subscribe` throw rejected with `error`
+    // never set.
+    const FALLBACK = { name: "Error", message: "unserializable error value" };
+
+    /** Thrown values `String()` (or `instanceof`) throws on. A fresh one per call. */
+    const UNSTRINGIFIABLE: Array<[string, () => unknown]> = [
+      ["Object.create(null)", () => Object.create(null)],
+      ["a throwing Symbol.toPrimitive", () => ({ [Symbol.toPrimitive]() { throw new Error("toPrimitive trap"); } })],
+      ["a throwing toString", () => ({ toString() { throw new Error("toString trap"); } })],
+      ["an object that converts to a symbol", () => ({ toString() { return Symbol("s"); } })],
+      ["a revoked Proxy", () => { const r = Proxy.revocable({}, {}); r.revoke(); return r.proxy; }],
+    ];
+
+    /** Provider `Error`s whose `name` / `message` / `code` cannot be read as strings. */
+    const HOSTILE_ERRORS: Array<[string, () => Error]> = [
+      ["an Error whose message String() rejects", () => Object.assign(new Error("x"), { message: Object.create(null) })],
+      ["an Error whose name converts to a symbol", () => Object.assign(new Error("x"), { name: { toString: () => Symbol("n") } })],
+      ["an Error with a throwing name getter", () => Object.defineProperty(new Error("x"), "name", { get() { throw new Error("trap"); } })],
+      ["an Error with a throwing code getter", () => Object.defineProperty(new Error("x"), "code", { get() { throw new Error("trap"); } })],
+    ];
+
+    interface Scenario {
+      provider: FlagProvider;
+      /** The public call(s) whose catch path handles `thrown`. */
+      act: (core: FlagsCore) => Promise<void>;
+      /** What a normal failure on this path leaves on the surface. */
+      flags: FlagMap;
+      identified: boolean;
+    }
+
+    /** Every catch path that publishes a provider failure. */
+    const PATHS: Array<[string, (thrown: unknown) => Scenario]> = [
+      ["identify rejection", (thrown) => ({
+        provider: makeStubProvider({ async identify() { throw thrown; } }),
+        act: (core) => core.identify("alice"),
+        flags: {},
+        identified: false,
+      })],
+      ["identify synchronous throw", (thrown) => ({
+        provider: makeStubProvider({ identify: (() => { throw thrown; }) as FlagProvider["identify"] }),
+        act: (core) => core.identify("alice"),
+        flags: {},
+        identified: false,
+      })],
+      ["re-identify rejection after a committed identity", (thrown) => ({
+        provider: makeStubProvider({
+          identify: vi.fn()
+            .mockResolvedValueOnce({ a: true })
+            .mockRejectedValueOnce(thrown),
+        }),
+        act: async (core) => { await core.identify("alice"); await core.identify("bob"); },
+        flags: {},
+        identified: false,
+      })],
+      ["reload rejection", (thrown) => ({
+        provider: makeStubProvider({ async identify() { return { a: true }; }, async reload() { throw thrown; } }),
+        act: async (core) => { await core.identify("alice"); await core.reload(); },
+        flags: { a: true },
+        identified: true,
+      })],
+      ["reload synchronous throw", (thrown) => ({
+        provider: makeStubProvider({
+          async identify() { return { a: true }; },
+          reload: (() => { throw thrown; }) as FlagProvider["reload"],
+        }),
+        act: async (core) => { await core.identify("alice"); await core.reload(); },
+        flags: { a: true },
+        identified: true,
+      })],
+      ["subscribe throw", (thrown) => ({
+        provider: makeStubProvider({ async identify() { return { a: true }; }, subscribe() { throw thrown; } }),
+        act: (core) => core.identify("alice"),
+        flags: { a: true },
+        identified: true,
+      })],
+    ];
+
+    /** Run `path` against `thrown`; assert the state every failure leaves. */
+    async function runAndExpectFallback(path: (thrown: unknown) => Scenario, thrown: unknown): Promise<FlagsCore> {
+      const scenario = path(thrown);
+      const core = new FlagsCore({ provider: scenario.provider });
+      const events = eventRecorder(core);
+      const seen: Array<Error | null> = [];
+      core.addEventListener("feature-flags:error", () => seen.push(core.originalError));
+
+      // Published, not thrown.
+      await expect(scenario.act(core)).resolves.toBeUndefined();
+
+      expect(core.loading).toBe(false);
+      expect(core.identified).toBe(scenario.identified);
+      expect(core.flags).toEqual(scenario.flags);
+      expect(core.error).toEqual(FALLBACK);
+      expect(Object.isFrozen(core.error)).toBe(true);
+      expect(isJsonValue(core.error)).toBe(true);
+      expect(core.originalError).toBeInstanceOf(Error);
+
+      // The last error event carries exactly the published value, with
+      // `originalError` already set when it fired.
+      const errorEvents = events.filter((e) => e.type === "feature-flags:error");
+      expect(errorEvents[errorEvents.length - 1].detail).toBe(core.error);
+      expect(seen[seen.length - 1]).toBe(core.originalError);
+      // `loading` went up and came back down.
+      const loading = events.filter((e) => e.type === "feature-flags:loading-changed").map((e) => e.detail);
+      expect(loading[loading.length - 1]).toBe(false);
+      return core;
+    }
+
+    describe.each(PATHS)("%s", (_path, path) => {
+      it.each(UNSTRINGIFIABLE)("%s: `error` and `originalError` read \"unserializable error value\"", async (_label, make) => {
+        const thrown = make();
+        expect(() => String(thrown)).toThrow(); // the premise
+        const core = await runAndExpectFallback(path, thrown);
+        // `===`, not `.not.toBe(thrown)`: the matcher itself probes its
+        // argument, which a revoked Proxy refuses.
+        expect(core.originalError === thrown).toBe(false);
+        expect(core.originalError?.name).toBe(FALLBACK.name);
+        expect(core.originalError?.message).toBe(FALLBACK.message);
+        expect(core.originalError && "cause" in core.originalError).toBe(false);
+      });
+
+      it.each(HOSTILE_ERRORS)("%s: `error` falls back, `originalError` keeps the instance", async (_label, make) => {
+        const thrown = make();
+        const core = await runAndExpectFallback(path, thrown);
+        expect(core.originalError).toBe(thrown);
+      });
+    });
+
+    it("a bare symbol is still described by String(), not replaced", async () => {
+      const core = new FlagsCore({ provider: makeStubProvider({ async identify() { throw Symbol("bare"); } }) });
+      await core.identify("alice");
+      expect(core.error).toEqual({ name: "Error", message: "Symbol(bare)" });
+      expect(core.originalError?.message).toBe("Symbol(bare)");
+      expect(core.loading).toBe(false);
+    });
+
+    it("a retry after such a failure clears `error` and `originalError` together", async () => {
+      const identify = vi.fn()
+        .mockRejectedValueOnce(Object.create(null))
+        .mockResolvedValueOnce({ a: true });
+      const core = new FlagsCore({ provider: makeStubProvider({ identify }) });
+      await core.identify("alice");
+      expect(core.error).toEqual(FALLBACK);
+
+      // `reload()` re-runs the failed identify.
+      await core.reload();
+      expect(core.error).toBeNull();
+      expect(core.originalError).toBeNull();
+      expect(core.identified).toBe(true);
+      expect(core.flags).toEqual({ a: true });
+      expect(core.loading).toBe(false);
+    });
+  });
+
   describe("updateUserContext + manual identify interaction", () => {
     it("re-identifies when _currentIdentity drifted from the refreshed userContext", async () => {
       // Regression: a manual identify("bob") overrides the

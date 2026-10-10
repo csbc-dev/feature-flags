@@ -289,6 +289,18 @@ describe("UnleashProvider", () => {
       await expect(p.identify(ID_ALICE)).rejects.toThrow(/string-error/);
     });
 
+    it("rejects (rather than hanging) when the SDK error cannot be turned into a string", async () => {
+      // Regression: `new Error(String(err))` threw inside `onError` after it
+      // had marked the wait settled, so the init promise never settled and
+      // identify() hung forever.
+      mockControl.autoReady = false;
+      mockControl.autoReadyError = Object.create(null);
+      const p = new UnleashProvider({ url: "http://u", appName: "app" });
+      const err = await p.identify(ID_ALICE).then(() => null, (e: unknown) => e);
+      expect(err).toBeInstanceOf(Error);
+      expect((err as Error).message).toBe("unserializable error value");
+    });
+
     it("a subsequent identify after a failed init can retry", async () => {
       mockControl.autoReady = false;
       mockControl.autoReadyError = new Error("transient");

@@ -259,6 +259,31 @@ describe("<feature-flags> over a real @wc-bindable/remote session", () => {
       expect(el.error?.name).toBe("Error");
       expect(logger.warn).not.toHaveBeenCalled();
     });
+
+    it("a provider rejection String() cannot convert still arrives as an error, with loading cleared", async () => {
+      // Regression: `new Error(String(err))` threw inside the Core's catch,
+      // so `identify` came back as a `throw` frame instead, with `error`
+      // never published and `loading` left `true`.
+      const core = new FlagsCore({
+        provider: stubProvider({ async identify() { throw Object.create(null); } }),
+      });
+      const { el, logger, wire } = await mount(core);
+
+      await el.identify("bob");
+      await settle();
+
+      expect(el.error).toBeInstanceOf(Error);
+      expect(el.error?.name).toBe("Error");
+      expect(el.error?.message).toBe("unserializable error value");
+      expect(el.loading).toBe(false);
+      expect(el.identified).toBe(false);
+      expect(el.flags).toEqual({});
+      expect(core.loading).toBe(false);
+      expect(core.originalError?.message).toBe("unserializable error value");
+      expect(wire.received.filter((m) => m.type === "throw")).toEqual([]);
+      expect(logger.warn).not.toHaveBeenCalled();
+      expect(logger.error).not.toHaveBeenCalled();
+    });
   });
 
   describe("FlagsCore.originalError — the original exception stays on the server", () => {

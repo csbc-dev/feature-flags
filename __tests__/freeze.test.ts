@@ -138,6 +138,158 @@ describe("deepCloneAndFreeze", () => {
       expect(isJsonValue(out)).toBe(true);
     });
   });
+
+  describe("values that cannot be read", () => {
+    // Providers can hand over objects whose reads throw. `JSON.stringify`
+    // throws on them; the clone treats such a value as having no JSON form
+    // instead — dropped from an object, `null` in an array — as it already
+    // substitutes for a cycle or a bigint, so one of them never takes the
+    // rest of the map down. Only a map that cannot be enumerated at all
+    // throws (FlagsCore publishes that as a provider failure).
+
+    function revoked(): object {
+      const r = Proxy.revocable({ a: 1 }, {});
+      r.revoke();
+      return r.proxy;
+    }
+
+    /** A getter chain that never ends: every read returns a fresh object, so there is no cycle to catch. */
+    function endless(): object {
+      return Object.defineProperty({}, "next", { enumerable: true, get: endless });
+    }
+
+    it("drops an entry whose getter or Proxy `get` trap throws, at any depth", () => {
+      const out = deepCloneAndFreeze({
+        ok: 1,
+        get bad() { throw new Error("getter"); },
+        nested: { keep: "x", get bad() { throw new Error("nested getter"); } },
+        proxied: new Proxy({ keep: true, bad: 1 }, {
+          get(t, k, r) {
+            if (k === "bad") throw new Error("get trap");
+            return Reflect.get(t, k, r);
+          },
+        }),
+      } as unknown as FlagMap);
+      expect(out).toEqual({ ok: 1, nested: { keep: "x" }, proxied: { keep: true } });
+      expect(Object.keys(out)).toEqual(["ok", "nested", "proxied"]);
+      expect(Object.isFrozen(out.nested)).toBe(true);
+      expect(isJsonValue(out)).toBe(true);
+    });
+
+    it("drops a value whose contents cannot be inspected", () => {
+      const out = deepCloneAndFreeze({
+        ok: 1,
+        revoked: revoked(),
+        ownKeys: new Proxy({ a: 1 }, { ownKeys() { throw new Error("ownKeys trap"); } }),
+        descriptor: new Proxy({ a: 1 }, { getOwnPropertyDescriptor() { throw new Error("descriptor trap"); } }),
+        length: new Proxy([1, 2], {
+          get(t, k, r) {
+            if (k === "length") throw new Error("length trap");
+            return Reflect.get(t, k, r);
+          },
+        }),
+        flag: { enabled: true, value: revoked() },
+      } as unknown as FlagMap);
+      expect(out).toEqual({ ok: 1, flag: { enabled: true } });
+      expect(isJsonValue(out)).toBe(true);
+    });
+
+    it("turns an array element that cannot be read into null", () => {
+      const list: unknown[] = [1, 2, revoked(), 4];
+      Object.defineProperty(list, 1, { enumerable: true, get() { throw new Error("element getter"); } });
+      const out = deepCloneAndFreeze({ list } as unknown as FlagMap);
+      expect(out.list).toEqual([1, null, null, 4]);
+      expect(Object.isFrozen(out.list)).toBe(true);
+      expect(isJsonValue(out)).toBe(true);
+    });
+
+    it("reads an array's length once, as JSON.stringify does", () => {
+      // Re-reading it per index let a Proxy that reports more on every read
+      // keep the loop going (here, from 2 to 1,000 elements).
+      let reads = 0;
+      const growing = new Proxy(["a", "b"], {
+        get(t, k, r) {
+          if (k === "length") return reads++ === 0 ? 2 : 1_000;
+          return Reflect.get(t, k, r);
+        },
+      });
+      const out = deepCloneAndFreeze({ list: growing } as unknown as FlagMap);
+      expect(out.list).toEqual(["a", "b"]);
+      expect(reads).toBe(1);
+    });
+
+    it("drops the whole flag when a read below it throws a RangeError — what running out of stack throws", () => {
+      // A lazy getter formatting an invalid date throws `RangeError` too; it
+      // cannot be told apart safely, so it unwinds to the top-level entry.
+      // Siblings, and a top-level entry's own failing read, stay granular.
+      const invalidDate = () => new Date(Number.NaN).toISOString();
+      const out = deepCloneAndFreeze({
+        ok: 1,
+        get top() { return invalidDate(); },
+        flag: { enabled: true, value: { get at() { return invalidDate(); } } },
+        sibling: { enabled: true, get bad() { throw new Error("getter"); } },
+      } as unknown as FlagMap);
+      expect(out).toEqual({ ok: 1, sibling: { enabled: true } });
+    });
+
+    it("still collapses a cycle reached through a getter, next to a getter that throws", () => {
+      const flag: Record<string, unknown> = { enabled: true };
+      Object.defineProperty(flag, "self", { enumerable: true, get: () => flag });
+      Object.defineProperty(flag, "bad", { enumerable: true, get() { throw new Error("getter"); } });
+      const out = deepCloneAndFreeze({ ok: 1, flag } as unknown as FlagMap);
+      expect(out).toEqual({ ok: 1, flag: { enabled: true, self: null } });
+      expect(isJsonValue(out)).toBe(true);
+    });
+
+    it("drops the whole flag when its getters never end, not a cut wherever the stack ran out — also once optimized", () => {
+      // Warm the clone up first: a stack check that calls into the engine
+      // (a regex on the message) passed cold and failed once optimized, V8
+      // reporting the regex it could not compile out of stack as a
+      // SyntaxError — and the flag came back as a chain ~1,800 levels deep.
+      const warm = {
+        a: { enabled: true, value: [1, "x", null, { b: [true] }] },
+        get bad() { throw new Error("getter"); },
+      } as unknown as FlagMap;
+      for (let i = 0; i < 5_000; i++) deepCloneAndFreeze(warm);
+
+      for (let i = 0; i < 3; i++) {
+        const out = deepCloneAndFreeze({ ok: 1, deep: { enabled: true, value: endless() } } as unknown as FlagMap);
+        expect(Object.keys(out)).toEqual(["ok"]);
+      }
+    });
+
+    it("drops the whole flag when a nested read throws a value `instanceof` cannot inspect", () => {
+      // The stack check cannot decide (a revoked Proxy throws on
+      // `instanceof`), so the error keeps unwinding to the top-level entry.
+      const thrown = revoked();
+      const out = deepCloneAndFreeze({
+        ok: 1,
+        flag: { enabled: true, value: { get bad() { throw thrown; } } },
+      } as unknown as FlagMap);
+      expect(out).toEqual({ ok: 1 });
+    });
+
+    it.each<[string, () => unknown]>([
+      ["a revoked Proxy", () => revoked()],
+      ["a Proxy whose ownKeys trap throws", () => new Proxy({ a: 1 }, { ownKeys() { throw new Error("ownKeys trap"); } })],
+      ["a Proxy whose getOwnPropertyDescriptor trap throws", () => new Proxy({ a: 1 }, { getOwnPropertyDescriptor() { throw new Error("descriptor trap"); } })],
+      ["undefined", () => undefined],
+      ["null", () => null],
+    ])("throws when the map itself cannot be enumerated: %s", (_label, make) => {
+      expect(() => deepCloneAndFreeze(make() as FlagMap)).toThrow();
+    });
+
+    it("throws the trap's own exception, so a caller can publish it", () => {
+      const trap = new Error("ownKeys trap");
+      let caught: unknown;
+      try {
+        deepCloneAndFreeze(new Proxy({}, { ownKeys() { throw trap; } }) as FlagMap);
+      } catch (err) {
+        caught = err;
+      }
+      expect(caught).toBe(trap);
+    });
+  });
 });
 
 describe("deepFreeze", () => {

@@ -466,6 +466,43 @@ describe("<feature-flags> over a real @wc-bindable/remote session", () => {
       expect(logger.warn).not.toHaveBeenCalled();
     });
 
+    it("a flag map that cannot be enumerated arrives as an error with loading cleared; an unreadable flag is dropped", async () => {
+      // Regression: the Core published the provider's map outside its try,
+      // so `identify` came back as a `throw` frame instead, with `error`
+      // never published and `loading` left `true`.
+      const identify = vi.fn()
+        .mockResolvedValueOnce(new Proxy({ a: true }, {
+          ownKeys() { throw new TypeError("flag store closed"); },
+        }))
+        .mockResolvedValueOnce({ ok: { enabled: true, value: "x" }, get broken() { throw new Error("lazy flag failed"); } });
+      const core = new FlagsCore({ provider: stubProvider({ identify }) });
+      const { el, logger, wire } = await mount(core);
+
+      await el.identify("bob");
+      await settle();
+
+      expect(el.error).toBeInstanceOf(Error);
+      expect(el.error?.name).toBe("TypeError");
+      expect(el.error?.message).toBe("flag store closed");
+      expect(el.loading).toBe(false);
+      expect(el.identified).toBe(false);
+      expect(el.flags).toEqual({});
+      expect(core.loading).toBe(false);
+
+      // The retry re-runs the identify; of its map, everything readable is
+      // published and the broken flag is dropped.
+      await el.reload();
+      await settle();
+      expect(el.error).toBeNull();
+      expect(el.flags).toEqual({ ok: { enabled: true, value: "x" } });
+      expect(el.identified).toBe(true);
+      expect(core.flags).toEqual(el.flags);
+
+      expect(wire.received.filter((m) => m.type === "throw")).toEqual([]);
+      expect(logger.warn).not.toHaveBeenCalled();
+      expect(logger.error).not.toHaveBeenCalled();
+    });
+
     it("a provider push carrying a non-JsonValue flag still reaches the element", async () => {
       const provider = new InMemoryFlagProvider({ flags: [{ key: "a", defaultValue: true }] });
       const core = new FlagsCore({ provider });

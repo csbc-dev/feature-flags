@@ -1304,6 +1304,237 @@ describe("FlagsCore", () => {
     });
   });
 
+  describe("a flag map that cannot be read — never thrown, never left loading", () => {
+    // Regression: `_doIdentify` published the provider's map outside its
+    // `try`, so a map `deepCloneAndFreeze` throws on made `identify()`
+    // reject with `loading` stuck at `true` and `error` unset; a pushed one
+    // threw into the provider's fan-out and was lost without an `error`.
+    //
+    // Two outcomes, per `freeze.ts`: an entry that cannot be read is dropped
+    // (`null` in an array) like `undefined`, and the rest is published; a map
+    // that cannot be enumerated at all is a provider failure of the path
+    // that delivered it.
+    const COMMITTED: FlagMap = { a: true };
+
+    function revoked(): object {
+      const r = Proxy.revocable({ a: true }, {});
+      r.revoke();
+      return r.proxy;
+    }
+
+    /** A getter chain that never ends: every read returns a fresh object, so there is no cycle to catch. */
+    function endless(): object {
+      return Object.defineProperty({}, "next", { enumerable: true, get: endless });
+    }
+
+    /**
+     * Maps that cannot be enumerated. Fresh per call. (An `async` provider
+     * that resolves a revoked Proxy is already a rejection — promise
+     * resolution reads `then` — so that one reaches `_publishFlags` only
+     * through a push.)
+     */
+    const UNENUMERABLE: Array<[string, () => unknown]> = [
+      ["a revoked Proxy", () => revoked()],
+      ["a Proxy whose ownKeys trap throws", () => new Proxy({ a: true }, { ownKeys() { throw new Error("ownKeys trap"); } })],
+      ["a Proxy whose getOwnPropertyDescriptor trap throws", () => new Proxy({ a: true }, { getOwnPropertyDescriptor() { throw new Error("descriptor trap"); } })],
+      ["undefined", () => undefined],
+      ["null", () => null],
+    ];
+
+    /** Maps with entries that cannot be read, and what is published of them. Fresh per call. */
+    const PARTLY_UNREADABLE: Array<[string, () => unknown, FlagMap]> = [
+      ["a throwing getter", () => ({ ok: true, get bad() { throw new Error("getter"); } }), { ok: true }],
+      ["a Proxy whose get trap throws for one flag", () => new Proxy({ ok: true, bad: true }, {
+        get(t, k, r) {
+          if (k === "bad") throw new Error("get trap");
+          return Reflect.get(t, k, r);
+        },
+      }), { ok: true }],
+      ["a revoked Proxy as a flag value", () => ({ ok: true, bad: revoked() }), { ok: true }],
+      ["a nested value whose ownKeys trap throws", () => ({
+        ok: true,
+        flag: { enabled: true, value: new Proxy({}, { ownKeys() { throw new Error("ownKeys trap"); } }) },
+      }), { ok: true, flag: { enabled: true } }],
+      ["array elements that cannot be read", () => {
+        const value: unknown[] = [1, 2, revoked()];
+        Object.defineProperty(value, 1, { enumerable: true, get() { throw new Error("element getter"); } });
+        return { ok: true, list: { enabled: true, value } };
+      }, { ok: true, list: { enabled: true, value: [1, null, null] } }],
+      ["a cycle through a getter next to a throwing getter", () => {
+        const flag: Record<string, unknown> = { enabled: true };
+        Object.defineProperty(flag, "self", { enumerable: true, get: () => flag });
+        Object.defineProperty(flag, "bad", { enumerable: true, get() { throw new Error("getter"); } });
+        return { ok: true, flag };
+      }, { ok: true, flag: { enabled: true, self: null } }],
+      ["a getter chain that never ends", () => ({ ok: true, deep: endless() }), { ok: true }],
+    ];
+
+    interface Scenario {
+      provider: FlagProvider;
+      /** The public call(s) that deliver the map. */
+      act: (core: FlagsCore) => Promise<void>;
+      /** Whether a map is committed when the broken one arrives (and so stays). */
+      committed: boolean;
+    }
+
+    /** Every path on which the Core publishes a provider's map. */
+    const PATHS: Array<[string, (map: () => unknown) => Scenario]> = [
+      ["identify", (map) => ({
+        provider: makeStubProvider({ async identify() { return map() as FlagMap; } }),
+        act: (core) => core.identify("alice"),
+        committed: false,
+      })],
+      ["re-identify after a committed identity", (map) => ({
+        provider: makeStubProvider({
+          identify: vi.fn()
+            .mockResolvedValueOnce(COMMITTED)
+            .mockImplementationOnce(async () => map()),
+        }),
+        act: async (core) => { await core.identify("alice"); await core.identify("bob"); },
+        committed: false,
+      })],
+      ["reload", (map) => ({
+        provider: makeStubProvider({ async identify() { return COMMITTED; }, async reload() { return map() as FlagMap; } }),
+        act: async (core) => { await core.identify("alice"); await core.reload(); },
+        committed: true,
+      })],
+      ["subscribe push", (map) => {
+        let push!: (next: FlagMap) => void;
+        return {
+          provider: makeStubProvider({
+            async identify() { return COMMITTED; },
+            subscribe(_id, onChange) { push = onChange; return () => {}; },
+          }),
+          act: async (core) => {
+            await core.identify("alice");
+            // Pushed from the provider's own code: it must come back normally.
+            expect(() => push(map() as FlagMap)).not.toThrow();
+          },
+          committed: true,
+        };
+      }],
+    ];
+
+    describe.each(PATHS)("%s", (pathLabel, path) => {
+      it.each(UNENUMERABLE)("%s: a provider failure — `error` set, `loading` cleared, nothing thrown", async (_label, make) => {
+        const scenario = path(make);
+        const subscribe = vi.spyOn(scenario.provider, "subscribe");
+        const core = new FlagsCore({ provider: scenario.provider });
+        const events = eventRecorder(core);
+        const seen: Array<Error | null> = [];
+        core.addEventListener("feature-flags:error", () => seen.push(core.originalError));
+
+        await expect(scenario.act(core)).resolves.toBeUndefined();
+
+        // The state a provider failure on this path leaves: an identify that
+        // did not commit resets to `{}` / unidentified; a reload or a push
+        // keeps the committed map.
+        expect(core.loading).toBe(false);
+        expect(core.identified).toBe(scenario.committed);
+        expect(core.flags).toEqual(scenario.committed ? COMMITTED : {});
+        expect(core.originalError).toBeInstanceOf(Error);
+        expect(core.error).toEqual({ name: core.originalError!.name, message: core.originalError!.message });
+        expect(Object.isFrozen(core.error)).toBe(true);
+        expect(isJsonValue(core.error)).toBe(true);
+        expect(isJsonValue(core.flags)).toBe(true);
+        // A failed identify installs no subscription for its identity.
+        expect(subscribe).toHaveBeenCalledTimes(pathLabel === "identify" ? 0 : 1);
+
+        const errorEvents = events.filter((e) => e.type === "feature-flags:error");
+        expect(errorEvents[errorEvents.length - 1].detail).toBe(core.error);
+        expect(seen[seen.length - 1]).toBe(core.originalError);
+        const loading = events.filter((e) => e.type === "feature-flags:loading-changed").map((e) => e.detail);
+        expect(loading[loading.length - 1]).toBe(false);
+      });
+
+      it.each(PARTLY_UNREADABLE)("%s: the readable part is published, with no error", async (_label, make, expected) => {
+        const scenario = path(make);
+        const core = new FlagsCore({ provider: scenario.provider });
+
+        await expect(scenario.act(core)).resolves.toBeUndefined();
+
+        expect(core.flags).toEqual(expected);
+        expect(Object.isFrozen(core.flags)).toBe(true);
+        expect(isJsonValue(core.flags)).toBe(true);
+        expect(core.identified).toBe(true);
+        expect(core.loading).toBe(false);
+        expect(core.error).toBeNull();
+        expect(core.originalError).toBeNull();
+      });
+    });
+
+    it("`originalError` is the trap's own exception", async () => {
+      const trap = Object.assign(new TypeError("flag store closed"), { code: "ESTORECLOSED" });
+      const core = new FlagsCore({
+        provider: makeStubProvider({ async identify() { return new Proxy({}, { ownKeys() { throw trap; } }) as FlagMap; } }),
+      });
+      await core.identify("alice");
+      expect(core.originalError).toBe(trap);
+      expect(core.error).toEqual({ name: "TypeError", message: "flag store closed", code: "ESTORECLOSED" });
+    });
+
+    it("a reload retries the identify, and a readable map then commits", async () => {
+      const identify = vi.fn()
+        .mockResolvedValueOnce(undefined)
+        .mockResolvedValueOnce({ ok: true });
+      const core = new FlagsCore({ provider: makeStubProvider({ identify }) });
+      await core.identify("alice");
+      expect(core.error?.name).toBe("TypeError");
+      expect(core.identified).toBe(false);
+
+      await core.reload();
+      expect(identify).toHaveBeenCalledTimes(2);
+      expect(core.flags).toEqual({ ok: true });
+      expect(core.identified).toBe(true);
+      expect(core.error).toBeNull();
+      expect(core.originalError).toBeNull();
+    });
+
+    it("after a failed push, the next readable push is published", async () => {
+      let push!: (next: FlagMap) => void;
+      const core = new FlagsCore({
+        provider: makeStubProvider({
+          async identify() { return COMMITTED; },
+          subscribe(_id, onChange) { push = onChange; return () => {}; },
+        }),
+      });
+      await core.identify("alice");
+      push(revoked() as FlagMap);
+      expect(core.flags).toEqual(COMMITTED);
+      expect(core.error?.name).toBe("TypeError");
+
+      push({ a: false });
+      expect(core.flags).toEqual({ a: false });
+    });
+
+    it("a pushed map whose trap re-identifies before throwing leaves the new identity's state alone", async () => {
+      // The generation guard on the push path's failure branch: the throw
+      // belongs to the superseded identity.
+      let push!: (next: FlagMap) => void;
+      const identify = vi.fn()
+        .mockResolvedValueOnce({ a: true })
+        .mockResolvedValueOnce({ b: true });
+      const core = new FlagsCore({
+        provider: makeStubProvider({ identify, subscribe(_id, onChange) { push = onChange; return () => {}; } }),
+      });
+      await core.identify("alice");
+
+      let bob!: Promise<void>;
+      push(new Proxy({}, {
+        ownKeys() {
+          bob = core.identify("bob");
+          throw new Error("ownKeys trap");
+        },
+      }) as FlagMap);
+      await bob;
+
+      expect(core.error).toBeNull();
+      expect(core.originalError).toBeNull();
+      expect(core.flags).toEqual({ b: true });
+      expect(core.identified).toBe(true);
+    });
+  });
+
   describe("updateUserContext + manual identify interaction", () => {
     it("re-identifies when _currentIdentity drifted from the refreshed userContext", async () => {
       // Regression: a manual identify("bob") overrides the

@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import { isJsonValue } from "@wc-bindable/remote";
 import { FlagsCore } from "../src/core/FlagsCore";
 import { InMemoryFlagProvider } from "../src/providers/InMemoryFlagProvider";
 import type { FlagIdentity, FlagMap, FlagProvider, UserContextLike } from "../src/types";
@@ -133,22 +134,61 @@ describe("FlagsCore", () => {
       const core = new FlagsCore({ provider: p });
       const events = eventRecorder(core);
       await core.identify("alice");
-      expect(core.error).toBeInstanceOf(Error);
       expect(core.error?.message).toBe("network down");
       expect(core.identified).toBe(false);
       expect(core.loading).toBe(false);
       const errEvents = events.filter((e) => e.type === "feature-flags:error" && e.detail);
       expect(errEvents).toHaveLength(1);
+      // The getter and the event carry the same value.
+      expect(errEvents[0].detail).toBe(core.error);
     });
 
-    it("wraps non-Error provider rejections into Error", async () => {
+    it("publishes the error as a frozen JSON value, not an Error instance", async () => {
+      // `error` crosses the @wc-bindable/remote wire, which (0.10+)
+      // drops any property value that is not a JsonValue — an `Error`
+      // instance never reached the browser. See `_toErrorInfo`.
+      const p = makeStubProvider({
+        async identify() { throw new Error("network down"); },
+      });
+      const core = new FlagsCore({ provider: p });
+      await core.identify("alice");
+      expect(core.error).not.toBeInstanceOf(Error);
+      expect(core.error).toEqual({ name: "Error", message: "network down" });
+      expect(Object.keys(core.error!)).toEqual(["name", "message"]);
+      expect(Object.isFrozen(core.error)).toBe(true);
+      expect(isJsonValue(core.error)).toBe(true);
+    });
+
+    it("keeps the error subclass name and a string `code`", async () => {
+      const p = makeStubProvider({
+        async identify() {
+          throw Object.assign(new TypeError("connect refused"), { code: "ECONNREFUSED" });
+        },
+      });
+      const core = new FlagsCore({ provider: p });
+      await core.identify("alice");
+      expect(core.error).toEqual({ name: "TypeError", message: "connect refused", code: "ECONNREFUSED" });
+      expect(isJsonValue(core.error)).toBe(true);
+    });
+
+    it("omits a non-string `code` rather than carrying it (or an undefined key)", async () => {
+      const p = makeStubProvider({
+        async identify() { throw Object.assign(new Error("http"), { code: 503 }); },
+      });
+      const core = new FlagsCore({ provider: p });
+      await core.identify("alice");
+      expect(core.error).toEqual({ name: "Error", message: "http" });
+      expect("code" in core.error!).toBe(false);
+    });
+
+    it("describes non-Error provider rejections the way `new Error(String(err))` did", async () => {
       const p = makeStubProvider({
         async identify() { throw "string-failure"; },
       });
       const core = new FlagsCore({ provider: p });
       await core.identify("alice");
-      expect(core.error).toBeInstanceOf(Error);
-      expect(core.error?.message).toBe("string-failure");
+      expect(core.error).toEqual({ name: "Error", message: "string-failure" });
+      expect(Object.isFrozen(core.error)).toBe(true);
     });
 
     it("a failed re-identify clears stale flags and identified state", async () => {
@@ -788,6 +828,21 @@ describe("FlagsCore", () => {
       const arr = (core.flags.palette as { value: string[] }).value;
       expect(Object.isFrozen(arr)).toBe(true);
       expect(() => arr.push("blue")).toThrow(TypeError);
+    });
+
+    it("publishes a JSON-normalized map when the provider hands back non-JSON values", async () => {
+      // One non-JSON leaf would make the remote wire drop the WHOLE map;
+      // the Core normalizes instead (see `freeze.ts` §3).
+      const p = makeStubProvider({
+        async identify() {
+          return { ok: true, gone: undefined, ratio: Number.NaN } as unknown as FlagMap;
+        },
+      });
+      const core = new FlagsCore({ provider: p });
+      await core.identify("alice");
+      expect(core.flags).toEqual({ ok: true, ratio: null });
+      expect("gone" in core.flags).toBe(false);
+      expect(isJsonValue(core.flags)).toBe(true);
     });
 
     it("isolates provider source from consumer mutation attempts", async () => {

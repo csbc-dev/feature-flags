@@ -14,11 +14,13 @@
           (auto.bundle.js — esbuild inlines @wc-bindable/remote + core), so it
           carries no bare specifiers either.
       The bundled @wc-bindable/* is pinned by the version the published package
-      depends on (@wc-bindable/* ^0.4.0), so the local transport and the CDN
+      depends on (@wc-bindable/* ^0.10.0), so the local transport and the CDN
       Shell agree on the wire/protocol version. The CDN Shell may resolve its
       own separate module instance; that is fine — the Shell binds the proxy
       through the version-stable wc-bindable v1 protocol (data + DOM events),
-      not by shared module identity.
+      not by shared module identity. (The CDN serves the PUBLISHED Shell: the
+      identify buttons need a release that includes the @wc-bindable/* 0.10
+      upgrade — see CONVENTIONS.md.)
     -->
 
     <style>

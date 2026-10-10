@@ -35,7 +35,7 @@ Decision rules:
 
 - **patch** — bug fixes, docs, tests, internal refactors only.
 - **minor** — backwards-compatible feature additions (new Provider, new option, new field on `flags`, etc.).
-- **major** — breaking changes (removing a public Shell property, changing the `FlagProvider` interface, following a major bump of `@wc-bindable/*`, etc.).
+- **major** — breaking changes (removing a public Shell property, changing the `FlagProvider` interface or the type of a public `FlagsCore` property, following a breaking `@wc-bindable/*` release, etc.). Pre-1.0, `@wc-bindable/*` ships breaking changes as **minor** bumps (e.g. `@wc-bindable/remote` `0.10.0` made the wire JSON-only), so judge an upstream bump by its release notes, not by which semver digit moved.
 
 > Pre-1.0 (currently 0.x), it is conventional to map breaking changes onto minor versions, but this package follows the stricter policy: **major for breaking, minor for features, patch for fixes — even before 1.0.**
 

@@ -1,4 +1,5 @@
 import { describe, it, expect } from "vitest";
+import { isJsonValue } from "@wc-bindable/remote";
 import { deepCloneAndFreeze, deepFreeze } from "../src/freeze";
 import type { FlagMap } from "../src/types";
 
@@ -61,6 +62,81 @@ describe("deepCloneAndFreeze", () => {
     const out = deepCloneAndFreeze(input);
     expect((out.a as { value: unknown }).value).toEqual({ v: 1 });
     expect((out.b as { value: unknown }).value).toEqual({ v: 1 });
+  });
+
+  describe("JSON normalization", () => {
+    // Since @wc-bindable/remote 0.10 a single non-JSON leaf makes the
+    // remote shell drop the WHOLE flag map. Leaves without a JSON form
+    // are normalized the way the pre-0.10 wire's JSON.stringify did.
+
+    it("drops object entries whose value has no JSON form (undefined / function / symbol)", () => {
+      const out = deepCloneAndFreeze({
+        keep: 1,
+        u: undefined,
+        f: () => true,
+        s: Symbol("s"),
+        nested: { keep: "x", u: undefined },
+      } as unknown as FlagMap);
+      expect(out).toEqual({ keep: 1, nested: { keep: "x" } });
+      expect(Object.keys(out)).toEqual(["keep", "nested"]);
+      expect(Object.keys(out.nested as object)).toEqual(["keep"]);
+      expect(isJsonValue(out)).toBe(true);
+    });
+
+    it("turns array elements without a JSON form, and holes, into null", () => {
+      const sparse = [1, , 3];
+      const out = deepCloneAndFreeze({
+        list: [1, undefined, () => 0, "x"],
+        sparse,
+      } as unknown as FlagMap);
+      expect(out.list).toEqual([1, null, null, "x"]);
+      expect(out.sparse).toEqual([1, null, 3]);
+      expect(1 in (out.sparse as unknown[])).toBe(true);
+      expect(isJsonValue(out)).toBe(true);
+    });
+
+    it("turns NaN / ±Infinity into null and keeps finite numbers", () => {
+      const out = deepCloneAndFreeze({
+        nan: Number.NaN,
+        inf: Infinity,
+        ninf: -Infinity,
+        n: 1.5,
+      } as unknown as FlagMap);
+      expect(out).toEqual({ nan: null, inf: null, ninf: null, n: 1.5 });
+    });
+
+    it("turns a bigint into its decimal string", () => {
+      const out = deepCloneAndFreeze({ big: BigInt("12345678901234567890") } as unknown as FlagMap);
+      expect(out.big).toBe("12345678901234567890");
+    });
+
+    it("copies non-plain objects / arrays into plain ones (own enumerable keys)", () => {
+      class Variation { constructor(public enabled: boolean) {} }
+      class TaggedArray extends Array<number> {}
+      const tagged = TaggedArray.from([1, 2]);
+      const out = deepCloneAndFreeze({
+        cls: new Variation(true),
+        date: new Date(0),
+        map: new Map([["a", 1]]),
+        tagged,
+      } as unknown as FlagMap);
+      expect(out).toEqual({ cls: { enabled: true }, date: {}, map: {}, tagged: [1, 2] });
+      expect(Object.getPrototypeOf(out.cls)).toBe(Object.prototype);
+      expect(Object.getPrototypeOf(out.tagged)).toBe(Array.prototype);
+      expect(isJsonValue(out)).toBe(true);
+    });
+
+    it("keeps an own `__proto__` key as an entry instead of re-pointing the prototype", () => {
+      const input = JSON.parse('{"__proto__": {"polluted": true}, "flag": {"__proto__": 1, "x": 2}}') as FlagMap;
+      const out = deepCloneAndFreeze(input);
+      expect(Object.getPrototypeOf(out)).toBe(Object.prototype);
+      expect(Object.prototype.hasOwnProperty.call(out, "__proto__")).toBe(true);
+      expect(Object.getOwnPropertyDescriptor(out, "__proto__")?.value).toEqual({ polluted: true });
+      expect((out as Record<string, unknown>).polluted).toBeUndefined();
+      expect(Object.getOwnPropertyDescriptor(out.flag, "__proto__")?.value).toBe(1);
+      expect(Object.isFrozen(out)).toBe(true);
+      expect(isJsonValue(out)).toBe(true);
+    });
   });
 });
 

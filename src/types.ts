@@ -187,6 +187,31 @@ export interface FlagsCoreOptions {
 }
 
 /**
+ * JSON-safe description of a provider failure: the value of
+ * {@link FlagsCore.error} and the `detail` of the Core's
+ * `feature-flags:error` event. Frozen; never mutated in place.
+ *
+ * Plain data rather than an `Error` instance because `error` is a
+ * bindable property that crosses the `@wc-bindable/remote` wire, and the
+ * wire only carries JSON values (enforced since remote 0.10): an `Error`
+ * would be dropped from every `update` and reported as a getter failure
+ * in `sync`, so the browser would never learn that the Core failed.
+ * `<feature-flags>` turns this back into an `Error` (`name` / `message` /
+ * `code` restored), so the browser-side {@link FlagsValues.error} is
+ * still `Error | null`.
+ *
+ * `stack` is deliberately not carried (server internals must not reach
+ * the browser), nor is `cause` (arbitrary provider data, not guaranteed
+ * to be JSON).
+ */
+export interface FlagsErrorInfo {
+  readonly name: string;
+  readonly message: string;
+  /** The original error's `code`, when it was a string (e.g. `"ECONNREFUSED"`). Absent otherwise. */
+  readonly code?: string;
+}
+
+/**
  * Browser-side bindable surface seen by `data-wcs` / `bind()`.
  *
  * Access individual flag values via `values.flags.<flagKey>`. The flag

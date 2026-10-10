@@ -10,7 +10,7 @@
     "build:shared": "esbuild ../shared/demo-session/auto.js --bundle --format=esm --outfile=../shared/demo-session/auto.bundle.js"
   },
   "dependencies": {
-    "@wc-bindable/remote": "^0.4.0",
+    "@wc-bindable/remote": "^0.10.0",
     "ws": "^8.20.0"
   },
   "devDependencies": {

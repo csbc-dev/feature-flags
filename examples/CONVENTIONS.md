@@ -252,12 +252,20 @@ This example is held to `@wcstack/state`'s own five rules. It MUST be:
 
    Because **neither** module reaches a bare specifier, the page needs no
    `importmap` at all. The bundled `@wc-bindable/*` is the version the published
-   package depends on (`@wc-bindable/*` `^0.4.0` → `0.4.0`, resolved from the
+   package depends on (`@wc-bindable/*` `^0.10.0` → `0.10.x`, resolved from the
    repo-root install when `build:shared` runs), so the local transport and the
    CDN Shell agree on the wire/protocol version. The CDN Shell may resolve a
    separate module instance of `@wc-bindable/*`; that is fine — the Shell binds
    the proxy through the version-stable wc-bindable v1 protocol (data + DOM
    events), not by shared module identity.
+
+   Caveat: the CDN serves the **published** Shell, not this checkout. The
+   0.10 transport validates every `invoke` argument as JSON, and Shells
+   published before the `@wc-bindable/*` 0.10 upgrade forward an omitted
+   `identify()` `attrs` as an `undefined` argument, which 0.10 rejects — so
+   this example's identify buttons need a published release that includes
+   the upgrade (the rejection is swallowed by `allSettled`, so the symptom
+   is "nothing happens").
 5. **Bindings follow the current `@wcstack/state` spec**, not guesses:
    - Element output properties → state paths:
      `data-wcs="flags: currentFlags; identified: flagsReady; loading: flagsLoading; error: flagsError"`.

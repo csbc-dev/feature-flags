@@ -128,7 +128,7 @@ Reference: [csbc-dev/arch (formerly hawc)](https://github.com/csbc-dev/arch/blob
 ### Public surface
 
 - **Output state**: `flags` (a frozen `Record<string, FlagValue>` map), `identified`, `loading`, `error`.
-- **Input / commands**: `identify(userId, attrs)`, `reload()`.
+- **Input / commands**: `identify(userId, attrs?)` (`attrs` must be a JSON value), `reload()`.
 - **Custom element**: `<feature-flags>` (Shell). Consumed declaratively from HTML, e.g. `data-wcs="flags: currentFlags; identified: flagsReady"`.
 
 The browser holds no SDK, no targeting logic, and no flag-service credentials. Everything runs server-side inside `FlagsCore`; the Shell only re-dispatches the bindable surface received over a `RemoteCoreProxy`.
@@ -195,9 +195,17 @@ Consumers access flags by dotted path: `values.flags.new_checkout_flow.enabled`.
 - **Transport failures** are handled one layer up by `<auth0-session>`; the last-known flag map is retained until a fresh session lights up.
 - **Precondition violations** (missing provider, dispose-after-use) throw synchronously.
 
+### JSON-only wire (`@wc-bindable/remote` ^0.10) — do not "simplify" these
+
+Since remote 0.10 both proxies validate values as strict JSON instead of coercing them through `JSON.stringify`: a non-JSON property value is dropped from `update` and listed in `getterFailures` on `sync` (which reads `core[name]` directly, bypassing any declaration `getter`), and a non-JSON `invoke` argument rejects with `WC_BINDABLE_INVALID_JSON_VALUE` before sending. Three places exist only because of this:
+
+- **`FlagsCore.error` is a frozen `FlagsErrorInfo` (`{ name, message, code? }`), never an `Error` instance** (`_toErrorInfo` in [src/core/FlagsCore.ts](src/core/FlagsCore.ts)) — both the getter and the event `detail`. Publishing the `Error` again would make every provider failure invisible to the browser. The Shell's `_asErrorOrNull` turns it back into an `Error`, so `<feature-flags>.error` stays `Error | null`.
+- **`deepCloneAndFreeze` ([src/freeze.ts](src/freeze.ts)) normalizes flag values to JSON** the way `JSON.stringify` would (drop `undefined` / function / symbol entries, `null` in arrays, non-finite → `null`, bigint → string). One bad leaf would otherwise drop the whole `flags` map on the wire.
+- **`<feature-flags>.identify()` omits `attrs` when it is absent and drops top-level `undefined` entries** — `invoke("identify", userId, undefined)` is rejected outright. Never forward an optional argument as `undefined`.
+
 ### Testing
 
-- `npm run test` / `npm run test:unit` — Vitest unit tests in [__tests__/](__tests__/).
+- `npm run test` / `npm run test:unit` — Vitest unit tests in [__tests__/](__tests__/). [`Flags.remote.test.ts`](__tests__/Flags.remote.test.ts) drives `<feature-flags>` through the REAL `RemoteShellProxy` / `RemoteCoreProxy` (JSON loopback transport); `Flags.test.ts`'s mock proxy validates nothing, so wire-level regressions only show up there.
 - `npm run test:coverage` — V8 coverage report, scoped to `src/**/*.ts` and excluding the type-only / re-export entry points.
 - `npm run test:integration` — builds the package then runs Playwright against the real Shell.
 

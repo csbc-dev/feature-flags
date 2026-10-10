@@ -16,6 +16,7 @@ export type {
   FlagProvider,
   FlagUnsubscribe,
   FlagsCoreOptions,
+  FlagsErrorInfo,
   FlagsmithProviderOptions,
   FlagsValues,
   LaunchDarklyContext,

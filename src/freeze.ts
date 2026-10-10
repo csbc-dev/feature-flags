@@ -42,6 +42,26 @@ import type { FlagMap, FlagValue } from "./types.js";
  *    Core publishes the same normalized map locally, so local and
  *    remote observers agree.
  *
+ * 4. **Values that cannot be read** — a getter or a Proxy `get` trap
+ *    that throws, or a value whose contents cannot be inspected (a
+ *    revoked Proxy, a throwing `ownKeys` / `getOwnPropertyDescriptor`
+ *    trap, an array whose `length` throws) — have no JSON form either:
+ *    dropped from an object, `null` in an array, exactly like
+ *    `undefined`. `JSON.stringify` would throw instead; like a cycle
+ *    (below) or a bigint, one such value must not take the rest of the
+ *    map down. A flag whose getters never end (each read returns a fresh
+ *    object, so there is no cycle to catch) runs the stack out; it is
+ *    dropped as a whole by its top-level entry, as is a flag in which a
+ *    nested read throws a `RangeError` — see {@link _cloneEntry}.
+ *
+ *    The one thing this function throws on is a `map` that cannot be
+ *    enumerated at all (a revoked Proxy, a throwing `ownKeys` /
+ *    `getOwnPropertyDescriptor` trap, `null` / `undefined`): there is no
+ *    readable part to publish, and publishing `{}` would silently wipe
+ *    every flag. It throws that error as-is, before producing anything;
+ *    `FlagsCore` publishes it as a failure of the identify / reload /
+ *    push that delivered the map.
+ *
  * Circular references: {@link FlagValue} forbids cycles by type, but
  * the Providers feed this function arbitrary SDK values (see 3). A
  * WeakSet tracks the current recursion path so an accidental cycle is
@@ -49,7 +69,7 @@ import type { FlagMap, FlagValue } from "./types.js";
  * defensive cycle handling in `_identityKey.ts`.
  */
 export function deepCloneAndFreeze(map: FlagMap): FlagMap {
-  return _cloneEntries(map, new WeakSet<object>());
+  return _cloneEntries(map, new WeakSet<object>(), true);
 }
 
 /**
@@ -106,13 +126,15 @@ function _freezeValue(v: FlagValue, seen: WeakSet<object>): void {
 
 /**
  * Frozen plain-object clone of `source`'s own enumerable string keys.
- * An entry whose value has no JSON form ({@link _cloneValue} returns
- * `undefined`) is dropped, as `JSON.stringify` drops it.
+ * An entry whose value has no JSON form ({@link _cloneEntry} returns
+ * `undefined`) is dropped, as `JSON.stringify` drops it. Throws only when
+ * `source` itself cannot be enumerated (`Object.keys`); for a nested
+ * object that reaches the parent's {@link _cloneEntry}, which drops it.
  */
-function _cloneEntries(source: object, seen: WeakSet<object>): Record<string, FlagValue> {
+function _cloneEntries(source: object, seen: WeakSet<object>, topLevel: boolean): Record<string, FlagValue> {
   const out: Record<string, FlagValue> = {};
   for (const k of Object.keys(source)) {
-    const value = _cloneValue((source as Record<string, unknown>)[k], seen);
+    const value = _cloneEntry(source, k, seen, topLevel);
     if (value === undefined) continue;
     if (k === "__proto__") {
       // An own `__proto__` key (as `JSON.parse` produces) must stay an
@@ -128,9 +150,60 @@ function _cloneEntries(source: object, seen: WeakSet<object>): Record<string, Fl
 }
 
 /**
+ * Read `source[key]` and clone it, or `undefined` when it has no JSON form
+ * — including when it cannot be read or inspected
+ * ({@link deepCloneAndFreeze} §4): whatever the read or the clone of this
+ * one entry throws makes it "no JSON form" here, so its siblings are still
+ * cloned.
+ *
+ * Except for the stack running out below the top level: that error keeps
+ * unwinding to the flag's top-level entry, which drops the whole flag.
+ * Absorbing it where it surfaced would keep a chain thousands of levels
+ * deep, cut wherever the stack happened to end — far past the remote
+ * wire's `maxDepth` (256 by default), which would then drop the entire
+ * `flags` update. At the top level the stack has unwound, and every
+ * failure is absorbed.
+ *
+ * "The stack ran out" is decided by `instanceof RangeError` alone, inside
+ * its own `try`: the check runs with (nearly) no stack left, and whatever
+ * it throws there must not replace the error being classified —
+ * undecided means "keep unwinding". (Testing the message is what went
+ * wrong first: V8 compiles a regex on first use and, out of stack,
+ * reported that as a `SyntaxError`, which replaced the `RangeError` and
+ * was absorbed as an ordinary failure one entry up — leaving a chain
+ * ~1,800 levels deep.) So any `RangeError` thrown below a top-level entry
+ * — a lazy getter formatting an invalid `Date` too — drops that whole
+ * flag, and so does a thrown value `instanceof` cannot inspect (a revoked
+ * Proxy).
+ */
+function _cloneEntry(
+  source: object,
+  key: string | number,
+  seen: WeakSet<object>,
+  topLevel: boolean,
+): FlagValue | undefined {
+  try {
+    return _cloneValue((source as Record<string | number, unknown>)[key], seen);
+  } catch (err) {
+    if (!topLevel) {
+      let unwind = true;
+      try {
+        unwind = err instanceof RangeError;
+      } catch {
+        // Not inspectable, or no stack left to inspect it: keep unwinding.
+      }
+      if (unwind) throw err;
+    }
+    return undefined;
+  }
+}
+
+/**
  * Clone one value into its frozen JSON form, or `undefined` when it has
  * none (see {@link deepCloneAndFreeze} §3 for the mapping). The caller
  * decides what "none" means: dropped from an object, `null` in an array.
+ * Throws when `v` cannot be inspected (§4); the caller's
+ * {@link _cloneEntry} turns that into "none".
  */
 function _cloneValue(v: unknown, seen: WeakSet<object>): FlagValue | undefined {
   switch (typeof v) {
@@ -156,15 +229,18 @@ function _cloneValue(v: unknown, seen: WeakSet<object>): FlagValue | undefined {
   try {
     if (Array.isArray(v)) {
       // Index loop, not `v.map()`: `map` keeps holes (and a subclass's
-      // species), neither of which is a JSON array.
+      // species), neither of which is a JSON array. `length` is read once,
+      // as `JSON.stringify` does — a Proxy that reports a longer one on
+      // every read would otherwise never let the loop end.
+      const length = v.length;
       const arr: FlagValue[] = [];
-      for (let i = 0; i < v.length; i++) {
-        const e = _cloneValue(v[i], seen);
+      for (let i = 0; i < length; i++) {
+        const e = _cloneEntry(v, i, seen, false);
         arr.push(e === undefined ? null : e);
       }
       return Object.freeze(arr) as FlagValue;
     }
-    return _cloneEntries(v, seen) as FlagValue;
+    return _cloneEntries(v, seen, false) as FlagValue;
   } finally {
     // Pop on exit so sibling subtrees that legitimately share a nested
     // object ref still clone normally; only ancestor-of-self cycles

@@ -233,9 +233,9 @@ export class FlagsCore extends EventTarget {
       // throw from `provider.reload(identity)` is caught by the same
       // path as an async rejection. Without this, a sync-throwing
       // provider would bypass `finally` and leave `loading=true`.
-      // `_publishFlags` stays inside it too: a map it cannot enumerate
-      // is a failed reload, published on `error` with the committed map
-      // kept.
+      // `_publishFlags` stays inside it too: a map it rejects (not an
+      // object of flags, or one it cannot enumerate) is a failed reload,
+      // published on `error` with the committed map kept.
       let reloadPromise: Promise<FlagMap> | null = null;
       try {
         reloadPromise = this._provider.reload(identity);
@@ -424,9 +424,10 @@ export class FlagsCore extends EventTarget {
     // throw from `provider.identify(identity)` is caught here rather
     // than escaping `_doIdentify` with `loading=true` left on. The
     // publish of its result belongs in the try as well, as in
-    // `reload()`: `_publishFlags` throws when the map cannot be
-    // enumerated at all (see `deepCloneAndFreeze`), and outside the try
-    // that rejected `identify()` with `loading=true` and `error` unset.
+    // `reload()`: `_publishFlags` throws when the map is not an object of
+    // flags or cannot be enumerated at all (see `deepCloneAndFreeze`),
+    // and outside the try that rejected `identify()` with `loading=true`
+    // and `error` unset.
     let identifyPromise: Promise<FlagMap> | null = null;
     try {
       identifyPromise = this._provider.identify(identity);
@@ -484,11 +485,11 @@ export class FlagsCore extends EventTarget {
     try {
       this._unsubscribeProvider = this._provider.subscribe(identity, (next) => {
         if (this._generation !== myGen) return;
-        // A pushed map that cannot be enumerated is a provider failure
-        // like a `subscribe` throw: published on `error`, with the last
-        // committed map kept. Thrown, it would only reach the provider's
-        // fan-out, which isolates and logs it — the update lost and
-        // nothing on `error`.
+        // A pushed map that is not an object of flags or cannot be
+        // enumerated is a provider failure like a `subscribe` throw:
+        // published on `error`, with the last committed map kept. Thrown,
+        // it would only reach the provider's fan-out, which isolates and
+        // logs it — the update lost and nothing on `error`.
         try {
           this._publishFlags(next);
         } catch (err) {
@@ -511,8 +512,10 @@ export class FlagsCore extends EventTarget {
 
   /**
    * Publish a provider's map as the new `flags` snapshot. Throws — before
-   * touching any state — when `next` cannot be enumerated at all (see
-   * `deepCloneAndFreeze`; an entry that merely cannot be read is dropped
+   * touching any state — when `next` is not an object of flags (a string,
+   * an array, `null`, …) or cannot be enumerated at all (see
+   * `deepCloneAndFreeze`; an entry that merely cannot be read, or that
+   * nests deeper than the remote wire carries, is dropped — and logged —
    * there instead). Every caller with a provider's map runs this inside
    * the `try` of the identify / reload / push that delivered it, so that
    * throw is published on `error` as that operation's failure.

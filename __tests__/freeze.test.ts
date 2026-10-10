@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import type { MockInstance } from "vitest";
+import { runInNewContext } from "node:vm";
 import { isJsonValue, toJsonValue } from "@wc-bindable/remote";
 import { __resetDroppedValueWarnings, deepCloneAndFreeze, deepFreeze } from "../src/freeze";
 import type { FlagMap } from "../src/types";
@@ -160,6 +161,14 @@ describe("deepCloneAndFreeze", () => {
       ["null", () => null, "null"],
       ["undefined", () => undefined, "undefined"],
     ])("%s: a TypeError naming the type, never the value", (_label, make, got) => {
+      expectNotAFlagMap(make, got);
+    });
+
+    /** Text inside the rejected values below; never in the error. */
+    const SECRET = "secret-flag-text";
+
+    /** Throws a TypeError naming `got`, and nothing of the value; logs nothing. */
+    function expectNotAFlagMap(make: () => unknown, got: string): void {
       let caught: unknown;
       try {
         deepCloneAndFreeze(make() as FlagMap);
@@ -170,16 +179,194 @@ describe("deepCloneAndFreeze", () => {
       expect((caught as Error).message).toBe(
         `[@csbc-dev/feature-flags] a flag map must be an object of flags; the provider returned ${got}.`,
       );
+      expect((caught as Error).message).not.toContain(SECRET);
       expect(warn).not.toHaveBeenCalled();
+    }
+
+    /** `o`, given an own `Symbol.toStringTag` that names something else than what it is. */
+    function retagged<T extends object>(o: T): T {
+      return Object.defineProperty(o, Symbol.toStringTag, { value: "FlagStore" });
+    }
+
+    describe("a built-in object whose contents are not its own keys", () => {
+      // Regression: any object passed the shape check — a `Map` was cloned
+      // as `{}` (every flag wiped), `new String("ab")` as `{ 0: "a", 1: "b" }`,
+      // a typed array as its indices. What those hold lives in internal
+      // slots; like a string, such a map is thrown, for FlagsCore to publish
+      // as a provider failure.
+      it.each<[string, () => unknown, string]>([
+        ["a Map", () => new Map([[SECRET, { enabled: true, value: SECRET }]]), "a Map"],
+        ["an empty Map", () => new Map(), "a Map"],
+        ["a Map subclass", () => new (class FlagStore extends Map<string, unknown> {})([[SECRET, true]]), "a Map"],
+        ["a Set", () => new Set([SECRET]), "a Set"],
+        ["a WeakMap", () => new WeakMap([[{}, SECRET]]), "a WeakMap"],
+        ["a WeakSet", () => new WeakSet([{}]), "a WeakSet"],
+        ["a Date", () => new Date(0), "a Date"],
+        ["an invalid Date", () => new Date(Number.NaN), "a Date"],
+        ["a RegExp", () => new RegExp(SECRET), "a RegExp"],
+        ["an Error", () => new Error(SECRET), "an Error"],
+        ["an Error subclass", () => new TypeError(SECRET), "an Error"],
+        ["an Error with flag-like own keys", () => Object.assign(new Error(SECRET), { code: SECRET }), "an Error"],
+        ["a Promise", () => Promise.resolve({ a: true }), "a Promise"],
+        ["a pending Promise", () => new Promise(() => {}), "a Promise"],
+        ["a String object", () => new String(SECRET), "a String object"],
+        ["an empty String object", () => new String(""), "a String object"],
+        ["a Number object", () => new Number(42), "a Number object"],
+        ["a Boolean object", () => new Boolean(true), "a Boolean object"],
+        ["a Symbol object", () => Object(Symbol(SECRET)), "a Symbol object"],
+        ["a BigInt object", () => Object(BigInt(7)), "a BigInt object"],
+        ["an ArrayBuffer", () => new ArrayBuffer(8), "an ArrayBuffer"],
+        ["a SharedArrayBuffer", () => new SharedArrayBuffer(8), "a SharedArrayBuffer"],
+        ["a DataView", () => new DataView(new ArrayBuffer(8)), "a DataView"],
+        ["a Uint8Array", () => new Uint8Array([1, 2]), "a Uint8Array"],
+        ["an Int8Array", () => new Int8Array(2), "an Int8Array"],
+        ["a Float64Array", () => new Float64Array(2), "a Float64Array"],
+        ["a BigInt64Array", () => new BigInt64Array(2), "a BigInt64Array"],
+      ])("%s: a TypeError naming the type, never the value", (_label, make, got) => {
+        expectNotAFlagMap(make, got);
+      });
+
+      it.each<[string, string, string]>([
+        ["a Map", "new Map([['flag', true]])", "a Map"],
+        ["a Set", "new Set(['flag'])", "a Set"],
+        ["a Date", "new Date(0)", "a Date"],
+        ["a RegExp", "/flag/", "a RegExp"],
+        ["an Error", "new RangeError('flag')", "an Error"],
+        ["a Promise", "Promise.resolve(1)", "a Promise"],
+        ["a String object", "new String('ab')", "a String object"],
+        ["an ArrayBuffer", "new ArrayBuffer(1)", "an ArrayBuffer"],
+        ["a Float32Array", "new Float32Array(1)", "a Float32Array"],
+        ["a DataView", "new DataView(new ArrayBuffer(1))", "a DataView"],
+        // The brand checks hold across realms too.
+        ["a Map with a tag of its own", "Object.defineProperty(new Map(), Symbol.toStringTag, { value: 'FlagStore' })", "a Map"],
+        ["a Uint16Array with a tag of its own", "Object.defineProperty(new Uint16Array(1), Symbol.toStringTag, { value: 'FlagStore' })", "a Uint16Array"],
+      ])("%s from another realm: rejected the same way", (_label, source, got) => {
+        const value = runInNewContext(source) as unknown;
+        // Not this realm's: `instanceof` would miss it.
+        expect(value instanceof Object).toBe(false);
+        expectNotAFlagMap(() => value, got);
+      });
+
+      it.each<[string, () => unknown, string]>([
+        // `Object.prototype.toString` names something else: the brand checks decide.
+        ["a Map subclass", () => new (class FlagStore extends Map {
+          get [Symbol.toStringTag]() { return "FlagStore"; }
+        })(), "a Map"],
+        ["a Map", () => retagged(new Map()), "a Map"],
+        ["a Set", () => retagged(new Set()), "a Set"],
+        ["a WeakMap", () => retagged(new WeakMap()), "a WeakMap"],
+        ["a WeakSet", () => retagged(new WeakSet()), "a WeakSet"],
+        ["a Date", () => retagged(new Date(0)), "a Date"],
+        ["a RegExp", () => retagged(/flag/), "a RegExp"],
+        ["a String object", () => retagged(new String(SECRET)), "a String object"],
+        ["a Number object", () => retagged(new Number(1)), "a Number object"],
+        ["a Boolean object", () => retagged(new Boolean(false)), "a Boolean object"],
+        ["a Symbol object", () => retagged(Object(Symbol(SECRET)) as object), "a Symbol object"],
+        ["a BigInt object", () => retagged(Object(BigInt(1)) as object), "a BigInt object"],
+        ["an ArrayBuffer", () => retagged(new ArrayBuffer(1)), "an ArrayBuffer"],
+        ["an Int32Array", () => retagged(new Int32Array(1)), "an Int32Array"],
+        ["a DataView", () => retagged(new DataView(new ArrayBuffer(1))), "a DataView"],
+      ])("%s with a tag of its own: still rejected as what it is", (_label, make, got) => {
+        expectNotAFlagMap(make, got);
+      });
+
+      it("a Map whose tag getter throws: still rejected as a Map, the getter's exception kept in", () => {
+        expectNotAFlagMap(() => Object.defineProperty(new Map(), Symbol.toStringTag, {
+          get() { throw new Error(`tag getter ${SECRET}`); },
+        }), "a Map");
+      });
+
+      it.each<[string, () => unknown, string]>([
+        // A Proxy forwards the tag of what it wraps.
+        ["a Proxy of a Map", () => new Proxy(new Map([[SECRET, true]]), {}), "a Map"],
+        ["a Proxy of a Promise", () => new Proxy(Promise.resolve(), {}), "a Promise"],
+        ["an object whose tag says Map", () => ({ [Symbol.toStringTag]: "Map", flag: true }), "a Map"],
+      ])("%s: taken at its word", (_label, make, got) => {
+        expectNotAFlagMap(make, got);
+      });
+
+      it("throws, rather than cloning the map as `{}`, when a brand check fails other than with its TypeError", async () => {
+        // Out of stack, a brand check throws a RangeError, which says nothing
+        // about the slot. Simulated by patching one before a fresh import
+        // captures it.
+        const original = Boolean.prototype.valueOf;
+        const outOfStack = new RangeError("Maximum call stack size exceeded");
+        const map = retagged({ flag: true });
+        let fresh: typeof import("../src/freeze");
+        Boolean.prototype.valueOf = function (this: boolean) {
+          if ((this as unknown) === map) throw outOfStack;
+          return original.call(this);
+        };
+        try {
+          vi.resetModules();
+          fresh = await import("../src/freeze");
+        } finally {
+          Boolean.prototype.valueOf = original;
+        }
+        let caught: unknown;
+        try {
+          fresh.deepCloneAndFreeze(map as unknown as FlagMap);
+        } catch (err) {
+          caught = err;
+        }
+        expect(caught).toBe(outOfStack);
+        // Any other object still passes every check.
+        expect(fresh.deepCloneAndFreeze(retagged({ flag: true }) as unknown as FlagMap)).toEqual({ flag: true });
+      });
+
+      it("keeps normalizing them below the top level, as it always has", () => {
+        const out = deepCloneAndFreeze({
+          map: { enabled: true, value: new Map([["a", 1]]) },
+          str: { enabled: true, value: new String("ab") },
+          bytes: { enabled: true, value: new Uint8Array([1, 2]) },
+          date: new Date(0),
+          promise: Promise.resolve(1),
+        } as unknown as FlagMap);
+        expect(out).toEqual({
+          map: { enabled: true, value: {} },
+          str: { enabled: true, value: { 0: "a", 1: "b" } },
+          bytes: { enabled: true, value: { 0: 1, 1: 2 } },
+          date: {},
+          promise: {},
+        });
+        expect(isJsonValue(out)).toBe(true);
+        expect(warn).not.toHaveBeenCalled();
+      });
     });
 
-    it("still accepts any non-array object, whatever its prototype", () => {
+    it("still accepts any other object, whatever its prototype or realm", () => {
       class FlagSet { beta = true; }
+      class TaggedFlagSet {
+        beta = true;
+        get [Symbol.toStringTag]() { return "TaggedFlagSet"; }
+      }
       const nullProto = Object.assign(Object.create(null) as object, { a: 1 });
       expect(deepCloneAndFreeze(new FlagSet() as unknown as FlagMap)).toEqual({ beta: true });
+      // Names itself, but is no built-in: every brand check fails.
+      expect(deepCloneAndFreeze(new TaggedFlagSet() as unknown as FlagMap)).toEqual({ beta: true });
       expect(deepCloneAndFreeze(nullProto as FlagMap)).toEqual({ a: 1 });
       expect(deepCloneAndFreeze(Object.freeze({ a: 1 }))).toEqual({ a: 1 });
       expect(deepCloneAndFreeze(new Proxy({ a: 1 }, {}))).toEqual({ a: 1 });
+      // A plain map from another realm, of either prototype.
+      expect(deepCloneAndFreeze(runInNewContext("({ a: 1, flag: { enabled: true, value: [1] } })") as FlagMap))
+        .toEqual({ a: 1, flag: { enabled: true, value: [1] } });
+      expect(deepCloneAndFreeze(runInNewContext("Object.assign(Object.create(null), { a: 1 })") as FlagMap)).toEqual({ a: 1 });
+      expect(warn).not.toHaveBeenCalled();
+    });
+
+    it("accepts a map whose tag cannot be read — the read's exception does not escape", () => {
+      const getter = Object.defineProperty({ a: 1 }, Symbol.toStringTag, {
+        get() { throw new Error("tag getter"); },
+      });
+      const trap = new Proxy({ a: 1 }, {
+        get(t, k, r) {
+          if (k === Symbol.toStringTag) throw new Error("get trap");
+          return Reflect.get(t, k, r);
+        },
+      });
+      expect(deepCloneAndFreeze(getter as FlagMap)).toEqual({ a: 1 });
+      expect(deepCloneAndFreeze(trap as FlagMap)).toEqual({ a: 1 });
+      expect(warn).not.toHaveBeenCalled();
     });
   });
 

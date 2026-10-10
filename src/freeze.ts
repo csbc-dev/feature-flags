@@ -74,13 +74,20 @@ import type { FlagMap, FlagValue } from "./types.js";
  * The one thing this function throws on is a `map` that is not a flag
  * map — anything but a non-array object (`null` / `undefined`, a string,
  * a number, an array, a function …; `Object.keys` would turn `"ab"` into
- * `{ 0: "a", 1: "b" }`) — or that cannot be enumerated at all (a revoked
- * Proxy, a throwing `ownKeys` / `getOwnPropertyDescriptor` trap): there is
- * no readable part to publish, and publishing `{}` would silently wipe
- * every flag. The shape check throws a `TypeError` naming only the type it
- * got; an error from enumerating is thrown as-is. Either way nothing is
- * produced (nor logged), and `FlagsCore` publishes the error as a failure
- * of the identify / reload / push that delivered the map.
+ * `{ 0: "a", 1: "b" }`), or a built-in object whose contents are not its
+ * own keys (a `Map` / `Set` / `WeakMap` / `WeakSet`, a `Date`, a `RegExp`,
+ * an `Error`, a `Promise`, a boxed primitive such as `new String("ab")`, an
+ * `ArrayBuffer` / `SharedArrayBuffer`, a typed array or a `DataView`; see
+ * {@link _builtInName}: a `Map` would be published as `{}`,
+ * `new String("ab")` as `{ 0: "a", 1: "b" }`) — or that cannot be
+ * enumerated at all (a revoked Proxy, a throwing `ownKeys` /
+ * `getOwnPropertyDescriptor` trap): there is no readable part to publish,
+ * and publishing `{}` would silently wipe every flag. The shape check
+ * throws a `TypeError` naming only the type it got; an error from
+ * enumerating is thrown as-is. Either way nothing is produced (nor
+ * logged), and `FlagsCore` publishes the error as a failure of the
+ * identify / reload / push that delivered the map. Below the top level
+ * those built-ins are normalized as in 3 (`Date` → `{}`), as before.
  *
  * Circular references: {@link FlagValue} forbids cycles by type, but
  * the Providers feed this function arbitrary SDK values (see 3). A
@@ -97,15 +104,143 @@ export function deepCloneAndFreeze(map: FlagMap): FlagMap {
   // case, thrown as-is like the `Object.keys` error below.
   const isArray = Array.isArray(value);
   if (typeof value !== "object" || value === null || isArray) {
-    const got = value === null ? "null" : isArray ? "an array" : value === undefined ? "undefined" : `a ${typeof value}`;
-    // The type only, never the value: this message is published on `error`
-    // and crosses the wire to the browser.
-    throw new TypeError(`[@csbc-dev/feature-flags] a flag map must be an object of flags; the provider returned ${got}.`);
+    throw _notAFlagMap(value === null ? "null" : isArray ? "an array" : value === undefined ? "undefined" : `a ${typeof value}`);
   }
+  const builtIn = _builtInName(value);
+  if (builtIn !== undefined) throw _notAFlagMap(_describeBuiltIn(builtIn));
   const ctx: CloneContext = { seen: new WeakSet<object>([map]), dropped: [] };
   const out = _cloneEntries(map, ctx, null, 1);
   if (ctx.dropped.length > 0) _warnDropped(ctx.dropped);
   return out;
+}
+
+/**
+ * The error {@link deepCloneAndFreeze} throws for a `map` that is not a flag
+ * map. `got` names the type only, never the value: this message is
+ * published on `error` and crosses the wire to the browser.
+ */
+function _notAFlagMap(got: string): TypeError {
+  return new TypeError(`[@csbc-dev/feature-flags] a flag map must be an object of flags; the provider returned ${got}.`);
+}
+
+/** Typed arrays, by the name each one's `Symbol.toStringTag` reports. */
+const TYPED_ARRAY_NAMES = [
+  "Int8Array", "Uint8Array", "Uint8ClampedArray", "Int16Array", "Uint16Array", "Int32Array", "Uint32Array",
+  "Float16Array", "Float32Array", "Float64Array", "BigInt64Array", "BigUint64Array",
+];
+
+/** Boxed primitives: "a String object", since "a string" is what the primitive is called. */
+const BOXED_PRIMITIVES: ReadonlySet<string> = new Set(["String", "Number", "Boolean", "Symbol", "BigInt"]);
+
+/**
+ * Built-in objects that are not maps of flags, by the name
+ * `Object.prototype.toString` reports for each. What they hold lives in
+ * internal slots, not in own enumerable keys, so a clone of one as a map
+ * would publish `{}` (a `Map`, a `Date`, a `Promise` …) or its indices
+ * (`new String("ab")` → `{ 0: "a", 1: "b" }`, a typed array) in place of
+ * every flag. Rejected at the top level only (see {@link _builtInName});
+ * as a flag's value, each is normalized like any other object.
+ */
+const NOT_FLAG_MAPS: ReadonlySet<string> = new Set([
+  "Map", "Set", "WeakMap", "WeakSet", "Date", "RegExp", "Error", "Promise",
+  ...BOXED_PRIMITIVES,
+  "ArrayBuffer", "SharedArrayBuffer", "DataView", ...TYPED_ARRAY_NAMES,
+]);
+
+// Captured once, so a later patch of a prototype cannot change what the
+// checks below do.
+const _apply = Reflect.apply;
+const _objectToString = Object.prototype.toString;
+const _isView = ArrayBuffer.isView;
+
+function _getter(proto: object, key: PropertyKey): (...args: never[]) => unknown {
+  return Object.getOwnPropertyDescriptor(proto, key)!.get!;
+}
+
+/** `%TypedArray%.prototype[Symbol.toStringTag]`: a typed array's name, `undefined` for anything else (a `DataView` …). */
+const _typedArrayName = _getter(Object.getPrototypeOf(Uint8Array.prototype) as object, Symbol.toStringTag);
+
+/**
+ * Brand checks: each throws a `TypeError` unless its receiver has that
+ * built-in's internal slot (`[[MapData]]`, `[[DateValue]]`,
+ * `[[StringData]]` …), and runs none of the receiver's own code — no
+ * getter, no Proxy trap (a Proxy has no such slot, whatever it wraps) — so
+ * they hold for an object from another realm and cannot be talked out of
+ * the answer. Typed arrays and `DataView` are told by `ArrayBuffer.isView`
+ * instead, and named by `[[TypedArrayName]]`. Not here: `Error` and `Promise`, which have no brand check that
+ * runs nothing (bar ES2026's `Error.isError`), and `SharedArrayBuffer`,
+ * which is not a global in a browser page that is not cross-origin
+ * isolated — `Object.prototype.toString` names those three.
+ */
+const BRAND_CHECKS: ReadonlyArray<readonly [string, (...args: never[]) => unknown]> = [
+  ["Map", Map.prototype.has],
+  ["Set", Set.prototype.has],
+  ["WeakMap", WeakMap.prototype.has],
+  ["WeakSet", WeakSet.prototype.has],
+  ["Date", Date.prototype.getTime],
+  ["RegExp", _getter(RegExp.prototype, "source")],
+  ["String", String.prototype.valueOf],
+  ["Number", Number.prototype.valueOf],
+  ["Boolean", Boolean.prototype.valueOf],
+  ["Symbol", Symbol.prototype.valueOf],
+  ["BigInt", BigInt.prototype.valueOf],
+  ["ArrayBuffer", _getter(ArrayBuffer.prototype, "byteLength")],
+];
+
+/**
+ * Which of {@link NOT_FLAG_MAPS} the top-level `v` is, or says it is;
+ * `undefined` for any other object — a plain object of any prototype
+ * (`null` included) and of any realm, a class instance, a Proxy of either.
+ * Never throws for what `v` does.
+ *
+ * `Object.prototype.toString` decides first, and is all a plain map — the
+ * common case — costs. It names `Date` / `RegExp` / `Error` and the boxed
+ * primitives by their internal slots, the others by the
+ * `Symbol.toStringTag` they inherit, so it holds across realms too. A
+ * value that says it is one of them is taken at its word: a Proxy of a
+ * `Map` (which forwards the `Map` tag) is rejected as a `Map`, though only
+ * its target has the slot. Reading the tag runs `v`'s own code (an
+ * inherited getter, a Proxy `get` trap); whatever that throws only means
+ * the tag tells nothing.
+ *
+ * When the tag names something else — a built-in subclass with a tag of
+ * its own (`class FlagStore extends Map` calling itself `"FlagStore"`), a
+ * class instance with one, a tag that could not be read — the
+ * {@link BRAND_CHECKS} decide. A tag of `"Object"` is believed without
+ * them: a built-in hidden that way (re-parented onto `Object.prototype`,
+ * its tag redefined as `"Object"`) is cloned as an object, because a brand
+ * check that fails throws, and every plain map would pay a dozen
+ * exceptions per publish for it.
+ */
+function _builtInName(v: object): string | undefined {
+  let name = "";
+  try {
+    // "[object Map]" → "Map".
+    name = (_apply(_objectToString, v, []) as string).slice(8, -1);
+  } catch {
+    // A tag getter or a Proxy `get` trap threw: the brand checks decide.
+  }
+  if (name === "Object") return undefined;
+  if (NOT_FLAG_MAPS.has(name)) return name;
+  if (_isView(v)) return (_apply(_typedArrayName, v, []) as string | undefined) ?? "DataView";
+  for (const [builtIn, check] of BRAND_CHECKS) {
+    try {
+      _apply(check, v, []);
+      return builtIn;
+    } catch (err) {
+      // Not this one — unless the check failed some other way than its
+      // TypeError (the stack ran out inside it). That is undecided, and is
+      // thrown as an error enumerating the map is, rather than the map
+      // taken for a plain object and published as `{}`.
+      if (!(err instanceof TypeError)) throw err;
+    }
+  }
+  return undefined;
+}
+
+/** `"a Map"`, `"an Error"`, `"a String object"`: a {@link NOT_FLAG_MAPS} name, as the not-a-flag-map error names it. */
+function _describeBuiltIn(name: string): string {
+  return `${"AEIO".includes(name.charAt(0)) ? "an" : "a"} ${name}${BOXED_PRIMITIVES.has(name) ? " object" : ""}`;
 }
 
 /**

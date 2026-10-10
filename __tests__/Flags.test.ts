@@ -479,6 +479,55 @@ describe("<feature-flags>", () => {
     expect("cause" in (el.error as object)).toBe(false);
   });
 
+  it("re-hydrates FlagsCore's `{ name, message, code }` error payload into an Error", async () => {
+    // The exact shape FlagsCore publishes on `error` (a JSON value, so it
+    // survives @wc-bindable/remote 0.10). `el.error` must look like the
+    // provider's original error again.
+    const sess = makeSession();
+    const el = makeFlagsEl();
+    sess.ready = true;
+    await flush();
+    sess.proxy!._publish("error", { name: "TypeError", message: "connect refused", code: "ECONNREFUSED" });
+    expect(el.error).toBeInstanceOf(Error);
+    expect(el.error?.name).toBe("TypeError");
+    expect(el.error?.message).toBe("connect refused");
+    expect((el.error as Error & { code?: unknown }).code).toBe("ECONNREFUSED");
+  });
+
+  it("ignores a non-string `code` on an Error-shaped payload", async () => {
+    const sess = makeSession();
+    const el = makeFlagsEl();
+    sess.ready = true;
+    await flush();
+    sess.proxy!._publish("error", { message: "http", code: 503 });
+    expect(el.error?.message).toBe("http");
+    expect("code" in (el.error as object)).toBe(false);
+  });
+
+  it("accepts an empty message when it is paired with a name (a bare `new Error()` from the Core)", async () => {
+    const sess = makeSession();
+    const el = makeFlagsEl();
+    sess.ready = true;
+    await flush();
+    sess.proxy!._publish("error", { name: "AbortError", message: "" });
+    expect(el.error).toBeInstanceOf(Error);
+    expect(el.error?.name).toBe("AbortError");
+    expect(el.error?.message).toBe("");
+  });
+
+  it("does not treat an empty message without a usable name as Error-shaped", async () => {
+    // Neither payload names an error, so the JSON fallback keeps the
+    // fields observable instead of producing an anonymous empty Error.
+    const sess = makeSession();
+    const el = makeFlagsEl();
+    sess.ready = true;
+    await flush();
+    sess.proxy!._publish("error", { message: "" });
+    expect(el.error?.message).toBe('{"message":""}');
+    sess.proxy!._publish("error", { name: "", message: "" });
+    expect(el.error?.message).toBe('{"name":"","message":""}');
+  });
+
   it("JSON-stringifies plain-object error payloads whose String() collapses to [object Object]", async () => {
     // A vanilla `{ code, detail }` payload (no `message`, default
     // `toString`) yields the useless "[object Object]" sentinel via
@@ -598,6 +647,55 @@ describe("<feature-flags>", () => {
       name: "identify",
       args: ["alice", { role: "admin" }],
     });
+  });
+
+  it("identify(userId) without attrs sends only the userId (no undefined argument)", async () => {
+    // Regression: `invoke("identify", userId, undefined)` is rejected by
+    // @wc-bindable/remote 0.10 ("args[1] is undefined"); 0.4–0.9 had
+    // silently coerced it to null. See Flags.remote.test.ts for the same
+    // path through the real proxy.
+    const sess = makeSession();
+    const el = makeFlagsEl();
+    sess.ready = true;
+    await flush();
+    await el.identify("alice");
+    expect((sess.proxy as any).__lastInvoke).toEqual({ name: "identify", args: ["alice"] });
+  });
+
+  it("identify(userId, null) from an untyped caller also sends only the userId", async () => {
+    const sess = makeSession();
+    const el = makeFlagsEl();
+    sess.ready = true;
+    await flush();
+    await el.identify("alice", null as unknown as Record<string, unknown>);
+    expect((sess.proxy as any).__lastInvoke).toEqual({ name: "identify", args: ["alice"] });
+  });
+
+  it("identify() drops top-level undefined attrs and does not mutate the caller's object", async () => {
+    const sess = makeSession();
+    const el = makeFlagsEl();
+    sess.ready = true;
+    await flush();
+    const attrs = { plan: "pro", country: undefined, meta: { nested: null } };
+    await el.identify("alice", attrs);
+    const sent = (sess.proxy as any).__lastInvoke.args[1] as Record<string, unknown>;
+    expect(sent).toEqual({ plan: "pro", meta: { nested: null } });
+    expect(Object.keys(sent)).toEqual(["plan", "meta"]);
+    expect(sent).not.toBe(attrs);
+    expect("country" in attrs).toBe(true);
+  });
+
+  it("identify() keeps an own `__proto__` attr key as an entry", async () => {
+    const sess = makeSession();
+    const el = makeFlagsEl();
+    sess.ready = true;
+    await flush();
+    const attrs = JSON.parse('{"__proto__": {"x": 1}, "plan": "pro"}') as Record<string, unknown>;
+    await el.identify("alice", attrs);
+    const sent = (sess.proxy as any).__lastInvoke.args[1] as Record<string, unknown>;
+    expect(Object.getPrototypeOf(sent)).toBe(Object.prototype);
+    expect(Object.getOwnPropertyDescriptor(sent, "__proto__")?.value).toEqual({ x: 1 });
+    expect(sent.plan).toBe("pro");
   });
 
   it("forwards reload() to the proxy", async () => {

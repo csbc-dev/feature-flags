@@ -59,8 +59,8 @@
     "framework-agnostic"
   ],
   "dependencies": {
-    "@wc-bindable/core": "^0.4.0",
-    "@wc-bindable/remote": "^0.4.0"
+    "@wc-bindable/core": "^0.10.0",
+    "@wc-bindable/remote": "^0.10.0"
   },
   "peerDependencies": {
     "@launchdarkly/node-server-sdk": "^9.0.0",

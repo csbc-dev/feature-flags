@@ -118,6 +118,20 @@ export class Flags extends HTMLElement {
   /**
    * Re-identify on the server. Delegates to the session proxy's
    * `identify` command. Rejects if no session / proxy is attached.
+   *
+   * `attrs` crosses the wire, so it must be a JSON value: since
+   * `@wc-bindable/remote` 0.10 the proxy rejects anything else (code
+   * `WC_BINDABLE_INVALID_JSON_VALUE`) instead of coercing it. The two
+   * `undefined`s this signature itself invites are handled here:
+   *
+   * - an omitted `attrs` is not sent at all — passing it through as an
+   *   `undefined` argument would fail every plain `identify(userId)`;
+   * - top-level `undefined` entries are dropped, which is what the
+   *   providers already do with them ("trait absent") and what the
+   *   pre-0.10 JSON coercion did silently.
+   *
+   * Anything deeper (a nested `undefined`, a `Date`, …) is left for the
+   * proxy to reject — converting it is the caller's call.
    */
   async identify(userId: string, attrs?: Record<string, unknown>): Promise<void> {
     const proxy = this._sessionEl?.proxy;
@@ -126,7 +140,13 @@ export class Flags extends HTMLElement {
         "<feature-flags>: identify() called before a session proxy is attached. Wait for the target session's ready=true.",
       );
     }
-    await proxy.invoke("identify", userId, attrs);
+    // `== null` also covers an untyped caller passing `null`, which the
+    // Core reads as "no attrs" either way.
+    if (attrs == null) {
+      await proxy.invoke("identify", userId);
+      return;
+    }
+    await proxy.invoke("identify", userId, _withoutUndefinedEntries(attrs));
   }
 
   /**
@@ -535,21 +555,38 @@ function _asFlagMap(value: unknown): FlagMap {
   return EMPTY_FLAGS;
 }
 
+/**
+ * Copy of `attrs` without its top-level `undefined` entries (see
+ * `identify()`). `Object.fromEntries` defines own data properties, so an
+ * own `__proto__` key stays an entry instead of re-pointing the copy's
+ * prototype (which would make the whole argument a non-JSON value).
+ */
+function _withoutUndefinedEntries(attrs: Record<string, unknown>): Record<string, unknown> {
+  return Object.fromEntries(Object.entries(attrs).filter(([, v]) => v !== undefined));
+}
+
 function _asErrorOrNull(value: unknown): Error | null {
   if (value === null || value === undefined) return null;
   if (value instanceof Error) return value;
   if (typeof value === "string") return new Error(value);
   if (typeof value === "object") {
     // Prefer an explicit `message` field — covers Error-shaped POJOs
-    // and remote errors deserialized as plain objects. Restore `name`
-    // and `cause` from the same payload so consumers can still
-    // distinguish AbortError / TypeError / etc. after the round-trip
-    // through the wire flattens the prototype chain. `cause` is
-    // forwarded as a shallow value (no recursive rebuild) — we trust
+    // and remote errors deserialized as plain objects, notably the
+    // `{ name, message, code? }` that `FlagsCore` publishes. Restore
+    // `name`, `code` and `cause` from the same payload so consumers can
+    // still distinguish AbortError / TypeError / etc. after the
+    // round-trip through the wire flattens the prototype chain. `cause`
+    // is forwarded as a shallow value (no recursive rebuild) — we trust
     // the producer to keep it shallow; pathological cycles would
     // already have failed serialization upstream.
+    //
+    // An empty `message` is accepted only alongside a non-empty `name`:
+    // that pair is what `FlagsCore` sends for a bare `new Error()`, and
+    // restoring it keeps `el.error` identical to the original error. A
+    // lone empty `message` is not Error-shaped enough and falls through.
     const msg = (value as { message?: unknown }).message;
-    if (typeof msg === "string" && msg.length > 0) {
+    const name = (value as { name?: unknown }).name;
+    if (typeof msg === "string" && (msg.length > 0 || (typeof name === "string" && name.length > 0))) {
       return _restoreErrorMeta(new Error(msg), value);
     }
     // Fall back to `String(value)` so callers that supply a custom
@@ -581,6 +618,10 @@ function _asErrorOrNull(value: unknown): Error | null {
 function _restoreErrorMeta(err: Error, source: unknown): Error {
   const name = (source as { name?: unknown }).name;
   if (typeof name === "string" && name.length > 0) err.name = name;
+  // String `code` only — the shape `FlagsCore` publishes (and Node system
+  // errors use), mirroring how `@wc-bindable/remote` revives a `throw`.
+  const code = (source as { code?: unknown }).code;
+  if (typeof code === "string") (err as Error & { code?: string }).code = code;
   // `cause` is structurally optional on Error in ES2022. Use the
   // bracket form so older lib targets accept the assignment without a
   // declaration merge.

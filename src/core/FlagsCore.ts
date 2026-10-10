@@ -6,6 +6,7 @@ import type {
   FlagMap,
   FlagProvider,
   FlagsCoreOptions,
+  FlagsErrorInfo,
   FlagUnsubscribe,
   IWcBindable,
   UserContextLike,
@@ -47,7 +48,7 @@ export class FlagsCore extends EventTarget {
   private _flags: FlagMap = EMPTY_FLAGS;
   private _identified = false;
   private _loading = false;
-  private _error: Error | null = null;
+  private _error: FlagsErrorInfo | null = null;
 
   private _currentIdentity: FlagIdentity | null = null;
   private _unsubscribeProvider: FlagUnsubscribe | null = null;
@@ -99,7 +100,13 @@ export class FlagsCore extends EventTarget {
     return this._loading;
   }
 
-  get error(): Error | null {
+  /**
+   * Last provider failure, or `null`. A frozen, JSON-safe
+   * {@link FlagsErrorInfo} — not an `Error` instance — because this
+   * property crosses the remote wire; see `_toErrorInfo`.
+   * `<feature-flags>` re-hydrates it into an `Error` on the browser side.
+   */
+  get error(): FlagsErrorInfo | null {
     return this._error;
   }
 
@@ -188,7 +195,7 @@ export class FlagsCore extends EventTarget {
         this._publishFlags(next);
       } catch (err) {
         if (this._generation !== myGen) return;
-        this._setError(err instanceof Error ? err : new Error(String(err)));
+        this._setError(_toErrorInfo(err));
       } finally {
         if (reloadPromise) this._inFlight.delete(reloadPromise);
         if (this._generation === myGen) this._setLoading(false);
@@ -385,12 +392,12 @@ export class FlagsCore extends EventTarget {
       // UI keeps showing alice's flags → reload() hands over bob's).
       //
       // Reset the bindable surface so consumers see: `flags === {}`,
-      // `identified === false`, `error === err`. `_currentIdentity`
+      // `identified === false`, `error` describing `err`. `_currentIdentity`
       // stays set to the failed target so `reload()` can retry it
       // via `_doIdentify` (see `reload()`).
       this._publishFlags(EMPTY_FLAGS);
       this._setIdentified(false);
-      this._setError(err instanceof Error ? err : new Error(String(err)));
+      this._setError(_toErrorInfo(err));
       this._setLoading(false);
       return;
     } finally {
@@ -429,7 +436,7 @@ export class FlagsCore extends EventTarget {
       /* v8 ignore start -- sync subscribe throw between an already-awaited identify and its own line cannot observe a concurrent gen bump */
       if (this._generation !== myGen) return;
       /* v8 ignore stop */
-      this._setError(err instanceof Error ? err : new Error(String(err)));
+      this._setError(_toErrorInfo(err));
     }
   }
 
@@ -466,7 +473,7 @@ export class FlagsCore extends EventTarget {
     }));
   }
 
-  private _setError(value: Error | null): void {
+  private _setError(value: FlagsErrorInfo | null): void {
     // Dedupe only the null → null case. A non-null error is always
     // re-dispatched — a successive distinct failure must stay
     // observable even when it happens to === the previous by
@@ -478,6 +485,41 @@ export class FlagsCore extends EventTarget {
       bubbles: true,
     }));
   }
+}
+
+/**
+ * Reduce a caught provider failure to the JSON-safe {@link FlagsErrorInfo}
+ * published on `error` (both the getter and the event `detail`).
+ *
+ * Why not publish the `Error` itself: `error` is a bindable property,
+ * and `@wc-bindable/remote` (0.10+) only carries JSON values. An `Error`
+ * instance is not one, so the remote shell would drop every `update` for
+ * it and list it in `getterFailures` on `sync` (which reads `core.error`
+ * directly — a declaration `getter` could not fix that, and the
+ * declaration is shared with the Shell anyway). The browser would see the
+ * flag map reset to `{}` with `error` still `null`, silently breaking the
+ * "bind the error state" contract. (Before 0.10 the wire coerced it
+ * through `JSON.stringify` to `{}`, which lost the message instead.)
+ *
+ * Kept: `name`, `message`, and a string `code` — the fields
+ * `<feature-flags>` restores on its side. A non-`Error` throw keeps the
+ * previous `new Error(String(err))` reading: name `"Error"`, message the
+ * string form.
+ */
+function _toErrorInfo(err: unknown): FlagsErrorInfo {
+  if (!(err instanceof Error)) {
+    return Object.freeze({ name: "Error", message: String(err) });
+  }
+  const info: { name: string; message: string; code?: string } = {
+    name: String(err.name),
+    message: String(err.message),
+  };
+  // Only a string `code` is kept (omitted otherwise, never `undefined`):
+  // that is the discriminator shape Node system errors use, and the one
+  // the remote error envelope forwards.
+  const code = (err as { code?: unknown }).code;
+  if (typeof code === "string") info.code = code;
+  return Object.freeze(info);
 }
 
 /**

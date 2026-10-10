@@ -4,7 +4,7 @@
 
 It is not a visual UI widget. It is a **pure observation node** that connects server-side flag evaluation to reactive browser-side state:
 
-- **input / command surface**: `identify(userId, attrs)`, `reload()`
+- **input / command surface**: `identify(userId, attrs?)` (`attrs` must be a JSON value — it crosses the wire; see [Identity](#identity)), `reload()`
 - **output state surface**: `flags`, `identified`, `loading`, `error`
 
 Feature-flag state can be expressed declaratively in HTML, without writing SDK integration, identify calls, or streaming glue code in your UI layer.
@@ -76,6 +76,7 @@ Implications:
 - **Updates are whole-map.** Every change emits a new frozen map, not a delta. At ~100 flags * ~64 bytes per entry the payload is still under 10 KB per update — well within the budget for CSBC's WebSocket plane.
 - **No client schema required.** The server can add a flag and the next `flags-changed` event carries it. No migration.
 - **Reference-equality-based reactive frameworks see honest changes** (`Object.freeze({ ...next })`).
+- **Flag values are normalized to JSON.** The map crosses the wire, and `@wc-bindable/remote` 0.10+ drops the *entire* `flags` update if any value in it is not a JSON value. `FlagsCore` therefore publishes (locally and remotely alike) each provider value the way `JSON.stringify` would carry it: an entry whose value is `undefined` / a function / a symbol is dropped (`null` inside an array), `NaN` / `±Infinity` become `null`, a `bigint` becomes its decimal string, and a non-plain object becomes a plain copy of its own enumerable keys (`Date` → `{}`). One malformed value from a custom provider never takes the rest of the map down. The built-in providers already emit JSON values.
 
 ## Install
 
@@ -94,6 +95,14 @@ npm install @launchdarkly/node-server-sdk # LaunchDarkly
 ```
 
 Any transport-layer dependency already comes from `@csbc-dev/auth0` (via `@wc-bindable/remote`); `@csbc-dev/feature-flags` does not open its own socket.
+
+### `@wc-bindable/*` versions
+
+`@csbc-dev/feature-flags` depends on `@wc-bindable/core` / `@wc-bindable/remote` `^0.10.0`. Keep the session side (`@csbc-dev/auth0`, or whatever creates the `RemoteCoreProxy` that `<feature-flags>` observes) and the server's `RemoteShellProxy` on the same 0.10 line:
+
+- **The session proxy must come from `@wc-bindable/remote` 0.7 or later.** `<feature-flags>` replays the proxy's current values through `@wc-bindable/core`'s `bind()`, which (since core 0.7) detects them with the `in` operator; a `RemoteCoreProxy` answers that only from 0.7 on. Against an older proxy, a snapshot that synced before `<feature-flags>` attached is not replayed.
+- **Remote 0.10 carries JSON values only** and rejects anything else instead of coercing it. This package is built for that: `identify()` attrs must be JSON (see [Identity](#identity)), flag values are normalized (see [Schema-less design](#schema-less-design)), and `error` travels as a plain object (see [Error contract](#error-contract)).
+- **`FlagsCore.error` is a `FlagsErrorInfo` (`{ name, message, code? }`), not an `Error`.** Server-side code that read `core.error` — or the Core's own `feature-flags:error` event — as an `Error` instance (`instanceof Error`, `.stack`, `.cause`) must switch to these fields. The browser-side `<feature-flags>.error` is still `Error | null`.
 
 ## Server setup (Flagsmith)
 
@@ -156,6 +165,8 @@ Flagsmith targeting rules can match `IN` / `NOT_IN` against array traits in loca
 
 To override, call `flagsEl.identify(userId, attrs)` from the browser — this invokes `FlagsCore.identify()` over the session transport.
 
+`attrs` is optional and crosses the wire, so it must be a JSON value (plain objects, arrays, strings, finite numbers, booleans, `null`). `@wc-bindable/remote` 0.10+ rejects anything else with `WC_BINDABLE_INVALID_JSON_VALUE` before sending, instead of coercing it as older versions did. The two `undefined`s the signature itself invites are handled for you: an omitted `attrs` is simply not sent, and top-level `undefined` entries are dropped (`identify("alice", { plan: undefined })` sends `{}` — "trait absent"). A nested `undefined`, a `Date`, `NaN`, a class instance, … rejects the returned promise; convert first (e.g. `date.toISOString()`).
+
 ## Realtime updates
 
 v1 ships with polling only. `pollingIntervalMs` (default 30 s) controls how often `FlagsmithProvider` re-fetches each identity's flags. Lower it for faster propagation; set to `0` to disable background polling and rely solely on explicit `reload()` calls.
@@ -168,7 +179,7 @@ The `realtime: true` option is accepted on `FlagsmithProviderOptions` for forwar
 - **Transport failures** are handled one layer up by `<auth0-session>` — its `connected-changed: false` unwinds the subscription and the last-known flag map is retained until a fresh session lights up.
 - **Precondition violations** (missing provider, dispose-after-use, `<feature-flags>.identify()` / `.reload()` invoked before a session proxy has attached, `setConfig({ tagNames: { flags: "" } })`) throw synchronously.
 - **Target resolution failures** are not fatal: `<feature-flags target="...">` first emits a `did not resolve` error and rescues for up to **30 s** (DOM mutation observer + exponential-backoff property-poll). If the target still has not resolved by then, a final `did not resolve within 30s; giving up.` error is published and rescue stops. Bind `error` to surface either state.
-- **Remote errors** received as plain JSON objects (the wire flattens the prototype chain) are re-hydrated into `Error` instances on the shell with `message` / `name` / `cause` restored, so `error instanceof Error` and `.name === "AbortError"` continue to discriminate after a remote round-trip.
+- **Errors cross the wire as plain objects.** `FlagsCore.error` (and the `detail` of the Core's `feature-flags:error` event) is a frozen `FlagsErrorInfo` — `{ name, message, code? }`, with `code` present only when the provider's error carried a string one — rather than an `Error` instance, because `@wc-bindable/remote` 0.10+ carries JSON values only and would silently drop an `Error`. `stack` and `cause` are not sent. A non-`Error` throw is described as `{ name: "Error", message: String(thrown) }`. `<feature-flags>` re-hydrates the payload into an `Error` with `message` / `name` / `code` (and a `cause`, if a payload carries one) restored, so on the browser side `el.error instanceof Error` and `el.error.name === "TypeError"` continue to discriminate after the round-trip.
 - **LaunchDarkly option validation**: `contextKind: "multi"` is reserved for multi-kind contexts and rejected at construction; `pollInterval` / `initializationTimeoutMs` reject `NaN`, `Infinity`, and negative values (Flagsmith / Unleash do the same for their interval options).
 - **Identity attribute coercion**: Flagsmith / Unleash stringify trait values into their respective context shapes — `bigint` traits are coerced via `String(v)` rather than rejected, so `BigInt(42)` round-trips as the string `"42"` instead of throwing.
 

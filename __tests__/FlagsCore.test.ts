@@ -1,6 +1,8 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import type { MockInstance } from "vitest";
 import { isJsonValue } from "@wc-bindable/remote";
 import { FlagsCore } from "../src/core/FlagsCore";
+import { __resetDroppedValueWarnings } from "../src/freeze";
 import { InMemoryFlagProvider } from "../src/providers/InMemoryFlagProvider";
 import type { FlagIdentity, FlagMap, FlagProvider, UserContextLike } from "../src/types";
 
@@ -1311,10 +1313,30 @@ describe("FlagsCore", () => {
     // threw into the provider's fan-out and was lost without an `error`.
     //
     // Two outcomes, per `freeze.ts`: an entry that cannot be read is dropped
-    // (`null` in an array) like `undefined`, and the rest is published; a map
-    // that cannot be enumerated at all is a provider failure of the path
-    // that delivered it.
+    // (`null` in an array) like `undefined` — and logged, by path — and the
+    // rest is published; a map that cannot be enumerated at all, or that is
+    // not an object of flags, is a provider failure of the path that
+    // delivered it.
     const COMMITTED: FlagMap = { a: true };
+
+    const WARNING_PREFIX = "[@csbc-dev/feature-flags] dropped flag values that cannot be published: ";
+    const WARNING_SUFFIX = ". The rest of the flag map is published. (Each path is logged once per process.)";
+
+    let warn: MockInstance<typeof console.warn>;
+    beforeEach(() => {
+      __resetDroppedValueWarnings();
+      warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    });
+    afterEach(() => {
+      warn.mockRestore();
+    });
+
+    /** An object chain `levels` objects deep. */
+    function nested(levels: number): Record<string, unknown> {
+      let v: Record<string, unknown> = { leaf: "deep-secret" };
+      for (let i = 1; i < levels; i++) v = { next: v };
+      return v;
+    }
 
     function revoked(): object {
       const r = Proxy.revocable({ a: true }, {});
@@ -1341,32 +1363,67 @@ describe("FlagsCore", () => {
       ["null", () => null],
     ];
 
-    /** Maps with entries that cannot be read, and what is published of them. Fresh per call. */
-    const PARTLY_UNREADABLE: Array<[string, () => unknown, FlagMap]> = [
-      ["a throwing getter", () => ({ ok: true, get bad() { throw new Error("getter"); } }), { ok: true }],
+    /**
+     * Values that are not an object of flags, and the type the error names.
+     * Regression: `Object.keys` cloned them as maps — `"ab"` was published
+     * as `{ 0: "a", 1: "b" }`, a number or a function as `{}`.
+     */
+    const NOT_A_MAP: Array<[string, () => unknown, string]> = [
+      ["a string", () => "ab", "a string"],
+      ["a number", () => 42, "a number"],
+      ["a boolean", () => true, "a boolean"],
+      ["an array", () => [{ enabled: true }], "an array"],
+      ["a function", () => () => ({ a: true }), "a function"],
+    ];
+
+    /**
+     * Maps with entries that cannot be read, what is published of them, and
+     * the paths the one warning names (`null`: no warning). Fresh per call.
+     */
+    const PARTLY_UNREADABLE: Array<[string, () => unknown, FlagMap, string | null]> = [
+      ["a throwing getter", () => ({ ok: true, get bad() { throw new Error("getter"); } }), { ok: true },
+        "flags.bad (could not be read)"],
       ["a Proxy whose get trap throws for one flag", () => new Proxy({ ok: true, bad: true }, {
         get(t, k, r) {
           if (k === "bad") throw new Error("get trap");
           return Reflect.get(t, k, r);
         },
-      }), { ok: true }],
-      ["a revoked Proxy as a flag value", () => ({ ok: true, bad: revoked() }), { ok: true }],
+      }), { ok: true }, "flags.bad (could not be read)"],
+      ["a revoked Proxy as a flag value", () => ({ ok: true, bad: revoked() }), { ok: true },
+        "flags.bad (could not be read)"],
       ["a nested value whose ownKeys trap throws", () => ({
         ok: true,
         flag: { enabled: true, value: new Proxy({}, { ownKeys() { throw new Error("ownKeys trap"); } }) },
-      }), { ok: true, flag: { enabled: true } }],
+      }), { ok: true, flag: { enabled: true } }, "flags.flag.value (could not be read)"],
       ["array elements that cannot be read", () => {
         const value: unknown[] = [1, 2, revoked()];
         Object.defineProperty(value, 1, { enumerable: true, get() { throw new Error("element getter"); } });
         return { ok: true, list: { enabled: true, value } };
-      }, { ok: true, list: { enabled: true, value: [1, null, null] } }],
+      }, { ok: true, list: { enabled: true, value: [1, null, null] } },
+        "flags.list.value[1] (could not be read), flags.list.value[2] (could not be read)"],
       ["a cycle through a getter next to a throwing getter", () => {
         const flag: Record<string, unknown> = { enabled: true };
         Object.defineProperty(flag, "self", { enumerable: true, get: () => flag });
         Object.defineProperty(flag, "bad", { enumerable: true, get() { throw new Error("getter"); } });
         return { ok: true, flag };
-      }, { ok: true, flag: { enabled: true, self: null } }],
-      ["a getter chain that never ends", () => ({ ok: true, deep: endless() }), { ok: true }],
+      }, { ok: true, flag: { enabled: true, self: null } }, "flags.flag.bad (could not be read)"],
+      ["a getter chain that never ends", () => ({ ok: true, deep: endless() }), { ok: true },
+        "flags.deep (nested deeper than 256 levels)"],
+      // Regression: the map was not on the cycle guard's path, so a reference
+      // back to it was cloned one level more before collapsing.
+      ["flags pointing back at the map itself", () => {
+        const map: Record<string, unknown> = { ok: true };
+        map.self = map;
+        map.flag = { enabled: true, value: [map] };
+        return map;
+      }, { ok: true, self: null, flag: { enabled: true, value: [null] } }, null],
+      // Regression: past the wire's `maxDepth` (256, the map being level 1),
+      // the remote shell dropped the whole `flags` update.
+      ["a flag nested deeper than the wire carries, next to one at its limit", () => ({
+        ok: true,
+        edge: nested(255),
+        deep: { enabled: true, value: nested(255) },
+      }), { ok: true, edge: nested(255) }, "flags.deep (nested deeper than 256 levels)"],
     ];
 
     interface Scenario {
@@ -1416,7 +1473,10 @@ describe("FlagsCore", () => {
     ];
 
     describe.each(PATHS)("%s", (pathLabel, path) => {
-      it.each(UNENUMERABLE)("%s: a provider failure — `error` set, `loading` cleared, nothing thrown", async (_label, make) => {
+      it.each([
+        ...UNENUMERABLE,
+        ...NOT_A_MAP.map(([label, make]): [string, () => unknown] => [label, make]),
+      ])("%s: a provider failure — `error` set, `loading` cleared, nothing thrown", async (_label, make) => {
         const scenario = path(make);
         const subscribe = vi.spyOn(scenario.provider, "subscribe");
         const core = new FlagsCore({ provider: scenario.provider });
@@ -1445,9 +1505,24 @@ describe("FlagsCore", () => {
         expect(seen[seen.length - 1]).toBe(core.originalError);
         const loading = events.filter((e) => e.type === "feature-flags:loading-changed").map((e) => e.detail);
         expect(loading[loading.length - 1]).toBe(false);
+        // Nothing was published, so nothing was dropped and logged.
+        expect(warn).not.toHaveBeenCalled();
       });
 
-      it.each(PARTLY_UNREADABLE)("%s: the readable part is published, with no error", async (_label, make, expected) => {
+      it.each(NOT_A_MAP)("%s: `error` names the type it got, never the value", async (_label, make, got) => {
+        const scenario = path(make);
+        const core = new FlagsCore({ provider: scenario.provider });
+
+        await scenario.act(core);
+
+        expect(core.originalError).toBeInstanceOf(TypeError);
+        expect(core.error).toEqual({
+          name: "TypeError",
+          message: `[@csbc-dev/feature-flags] a flag map must be an object of flags; the provider returned ${got}.`,
+        });
+      });
+
+      it.each(PARTLY_UNREADABLE)("%s: the readable part is published, with no error", async (_label, make, expected, logged) => {
         const scenario = path(make);
         const core = new FlagsCore({ provider: scenario.provider });
 
@@ -1460,7 +1535,43 @@ describe("FlagsCore", () => {
         expect(core.loading).toBe(false);
         expect(core.error).toBeNull();
         expect(core.originalError).toBeNull();
+        // One warning, naming paths only — not an `error`.
+        if (logged === null) {
+          expect(warn).not.toHaveBeenCalled();
+        } else {
+          expect(warn.mock.calls).toEqual([[`${WARNING_PREFIX}${logged}${WARNING_SUFFIX}`]]);
+        }
       });
+    });
+
+    it("a flag that stays unreadable is logged once — not on every reload, push and identify, nor per Core", async () => {
+      let push!: (next: FlagMap) => void;
+      const broken = () => ({ ok: true, get bad() { throw new Error("getter"); } }) as unknown as FlagMap;
+      const provider = makeStubProvider({
+        async identify() { return broken(); },
+        async reload() { return broken(); },
+        subscribe(_id, onChange) { push = onChange; return () => {}; },
+      });
+      const core = new FlagsCore({ provider });
+      await core.identify("alice");
+      await core.reload();
+      push(broken());
+      await core.identify("bob");
+      await new FlagsCore({ provider }).identify("carol");
+
+      expect(core.flags).toEqual({ ok: true });
+      expect(warn.mock.calls).toEqual([[`${WARNING_PREFIX}flags.bad (could not be read)${WARNING_SUFFIX}`]]);
+    });
+
+    it("a built-in provider's own clone logs the value it drops; the Core does not log it again", async () => {
+      const value = Object.defineProperty({ keep: 1 }, "bad", { enumerable: true, get() { throw new Error("getter"); } });
+      const provider = new InMemoryFlagProvider({ flags: [{ key: "flag", defaultValue: value as unknown as FlagMap }] });
+      const core = new FlagsCore({ provider });
+      await core.identify("alice");
+      provider.setFlag("other", true);
+
+      expect(core.flags).toEqual({ flag: { keep: 1 }, other: true });
+      expect(warn.mock.calls).toEqual([[`${WARNING_PREFIX}flags.flag.bad (could not be read)${WARNING_SUFFIX}`]]);
     });
 
     it("`originalError` is the trap's own exception", async () => {

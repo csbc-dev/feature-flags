@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import type { MockInstance } from "vitest";
 import { createRemoteCoreProxy, RemoteShellProxy } from "@wc-bindable/remote";
 import type {
   ClientMessage,
@@ -9,6 +10,7 @@ import type {
 } from "@wc-bindable/remote";
 import { bootstrapFlags } from "../src/bootstrapFlags";
 import { FlagsCore } from "../src/core/FlagsCore";
+import { __resetDroppedValueWarnings } from "../src/freeze";
 import { InMemoryFlagProvider } from "../src/providers/InMemoryFlagProvider";
 import type { Flags } from "../src/components/Flags";
 import type { FlagIdentity, FlagMap, FlagProvider } from "../src/types";
@@ -133,13 +135,43 @@ const NORMALIZED_FLAGS = {
   big: "10",
 };
 
+/** An object chain `levels` objects deep: `{ next: { next: … { leaf: "deep-secret" } } }`. */
+function nested(levels: number): Record<string, unknown> {
+  let v: Record<string, unknown> = { leaf: "deep-secret" };
+  for (let i = 1; i < levels; i++) v = { next: v };
+  return v;
+}
+
+/**
+ * A map with one flag at the wire's `maxDepth` (256, the map being level 1)
+ * and one past it, which alone made `RemoteShellProxy` drop the whole map.
+ */
+function deepFlags(): FlagMap {
+  return {
+    ok: { enabled: true, value: "x" },
+    edge: nested(255),
+    deep: { enabled: true, value: nested(255) },
+  } as unknown as FlagMap;
+}
+
+const DEEP_FLAGS_PUBLISHED = { ok: { enabled: true, value: "x" }, edge: nested(255) };
+
+/** The one `console.warn` the Core's clone logs for `deepFlags()`. */
+const DEEP_FLAG_WARNING =
+  "[@csbc-dev/feature-flags] dropped flag values that cannot be published: flags.deep (nested deeper than 256 levels). " +
+  "The rest of the flag map is published. (Each path is logged once per process.)";
+
 describe("<feature-flags> over a real @wc-bindable/remote session", () => {
+  let consoleWarn: MockInstance<typeof console.warn>;
   beforeEach(() => {
     document.body.innerHTML = "";
+    __resetDroppedValueWarnings();
+    consoleWarn = vi.spyOn(console, "warn").mockImplementation(() => {});
   });
   afterEach(() => {
     document.body.innerHTML = "";
     for (const dispose of disposers.splice(0)) dispose();
+    consoleWarn.mockRestore();
   });
 
   it("the initial sync reaches the element with no dropped values", async () => {
@@ -497,10 +529,133 @@ describe("<feature-flags> over a real @wc-bindable/remote session", () => {
       expect(el.flags).toEqual({ ok: { enabled: true, value: "x" } });
       expect(el.identified).toBe(true);
       expect(core.flags).toEqual(el.flags);
+      // The dropped flag is logged on the server, by path only; the browser
+      // gets the map without it and no error.
+      expect(consoleWarn.mock.calls).toEqual([[
+        "[@csbc-dev/feature-flags] dropped flag values that cannot be published: flags.broken (could not be read). " +
+        "The rest of the flag map is published. (Each path is logged once per process.)",
+      ]]);
+      expect(JSON.stringify(wire.received)).not.toContain("lazy flag failed");
 
       expect(wire.received.filter((m) => m.type === "throw")).toEqual([]);
       expect(logger.warn).not.toHaveBeenCalled();
       expect(logger.error).not.toHaveBeenCalled();
+    });
+
+    describe("a flag nested deeper than the wire's maxDepth is dropped alone — the rest of the map arrives", () => {
+      // Regression: the Core published it as is, and RemoteShellProxy refused
+      // the whole `flags` value (`exceeds maxDepth=256`): the update was
+      // dropped and the element kept its old map — or, in the sync, listed
+      // `flags` in `getterFailures`.
+
+      it("identify (update)", async () => {
+        const core = new FlagsCore({ provider: stubProvider({ async identify() { return deepFlags(); } }) });
+        const { el, logger, wire } = await mount(core);
+
+        await el.identify("alice");
+        await settle();
+
+        expect(el.flags).toEqual(DEEP_FLAGS_PUBLISHED);
+        expect(el.identified).toBe(true);
+        expect(el.error).toBeNull();
+        expect(core.flags).toEqual(el.flags);
+        const updates = wire.received.filter((m) => m.type === "update" && m.name === "flags");
+        expect(updates.map((m) => (m as { value: unknown }).value)).toEqual([DEEP_FLAGS_PUBLISHED]);
+        expect(logger.warn).not.toHaveBeenCalled();
+        expect(consoleWarn.mock.calls).toEqual([[DEEP_FLAG_WARNING]]);
+      });
+
+      it("identify before the session connects (sync)", async () => {
+        const core = new FlagsCore({ provider: stubProvider({ async identify() { return deepFlags(); } }) });
+        await core.identify("alice");
+
+        const { el, logger, wire } = await mount(core);
+
+        const sync = wire.received.find((m) => m.type === "sync") as Extract<ServerMessage, { type: "sync" }>;
+        expect(sync.getterFailures).toBeUndefined();
+        expect(el.flags).toEqual(DEEP_FLAGS_PUBLISHED);
+        expect(el.identified).toBe(true);
+        expect(logger.warn).not.toHaveBeenCalled();
+      });
+
+      it("reload", async () => {
+        const core = new FlagsCore({
+          provider: stubProvider({ async identify() { return { ok: { enabled: false, value: null } }; }, async reload() { return deepFlags(); } }),
+        });
+        const { el, logger } = await mount(core);
+        await el.identify("alice");
+        await settle();
+
+        await el.reload();
+        await settle();
+
+        expect(el.flags).toEqual(DEEP_FLAGS_PUBLISHED);
+        expect(logger.warn).not.toHaveBeenCalled();
+        expect(consoleWarn.mock.calls).toEqual([[DEEP_FLAG_WARNING]]);
+      });
+
+      it("subscribe push", async () => {
+        let push!: (next: FlagMap) => void;
+        const core = new FlagsCore({
+          provider: stubProvider({
+            async identify() { return { ok: { enabled: false, value: null } }; },
+            subscribe(_id, onChange) { push = onChange; return () => {}; },
+          }),
+        });
+        const { el, logger } = await mount(core);
+        await el.identify("alice");
+        await settle();
+
+        push(deepFlags());
+        await settle();
+
+        expect(el.flags).toEqual(DEEP_FLAGS_PUBLISHED);
+        expect(logger.warn).not.toHaveBeenCalled();
+        expect(consoleWarn.mock.calls).toEqual([[DEEP_FLAG_WARNING]]);
+      });
+    });
+
+    it("a provider that returns a string arrives as an error, not as a map of its characters", async () => {
+      // Regression: `Object.keys("ab")` made it `{ 0: "a", 1: "b" }`, published
+      // with `identified: true`.
+      const identify = vi.fn()
+        .mockResolvedValueOnce("ab")
+        .mockResolvedValueOnce({ ok: true });
+      const core = new FlagsCore({ provider: stubProvider({ identify }) });
+      const { el, logger, wire } = await mount(core);
+
+      await el.identify("bob");
+      await settle();
+
+      expect(el.error).toBeInstanceOf(Error);
+      expect(el.error?.name).toBe("TypeError");
+      expect(el.error?.message).toBe("[@csbc-dev/feature-flags] a flag map must be an object of flags; the provider returned a string.");
+      expect(el.flags).toEqual({});
+      expect(el.identified).toBe(false);
+      expect(el.loading).toBe(false);
+
+      // The retry is published as usual.
+      await el.reload();
+      await settle();
+      expect(el.error).toBeNull();
+      expect(el.flags).toEqual({ ok: true });
+
+      expect(wire.received.filter((m) => m.type === "throw")).toEqual([]);
+      expect(logger.warn).not.toHaveBeenCalled();
+      expect(consoleWarn).not.toHaveBeenCalled();
+    });
+
+    it("a flag pointing back at the map arrives as null, at the place it points", async () => {
+      const map: Record<string, unknown> = { ok: true };
+      map.self = map;
+      const core = new FlagsCore({ provider: stubProvider({ async identify() { return map as unknown as FlagMap; } }) });
+      const { el, logger } = await mount(core);
+
+      await el.identify("alice");
+      await settle();
+
+      expect(el.flags).toEqual({ ok: true, self: null });
+      expect(logger.warn).not.toHaveBeenCalled();
     });
 
     it("a provider push carrying a non-JsonValue flag still reaches the element", async () => {
